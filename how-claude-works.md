@@ -615,3 +615,115 @@ against the binary. `src/` explains *why*; the binary proves *what ships*.
 Superseded versions are retained in `~/.local/share/claude/versions/` (2.1.234 … 2.1.237 all
 present, ~310–317MB each), with `~/.local/bin/claude` symlinked to the active one. ⇒ A rollback
 is just repointing that symlink, and the directory grows ~300MB per version kept.
+
+---
+
+## Claude Desktop 1.32885.1 (macOS)
+
+Not the `claude` CLI, but the same family and the same disassembly method. Bundle:
+`/Applications/Claude.app`, ~835MB. The interesting code is one Electron archive:
+`Contents/Resources/app.asar`. It contains `\0` bytes, so `rg` needs `--text`.
+
+### Desktop SSH does not support Kerberos / GSSAPI 🔬
+
+Desktop's "Add SSH connection" does **not** shell out to `/usr/bin/ssh`. It bundles the
+`ssh2` npm library and speaks the SSH protocol itself, in a class it logs as
+`[SSH2Connection]`.
+
+`ssh2` implements `none`, `publickey`, `password`, `keyboard-interactive`, `hostbased`
+and agent auth. It has **no GSSAPI support**, and neither does the bundle:
+
+```sh
+rg --text --only-matching --no-filename \
+   --regexp 'gssapi-with-mic' --regexp 'GSSAPIAuthentication' \
+   /Applications/Claude.app/Contents/Resources/app.asar | sort | uniq --count
+# (no output — zero matches)
+```
+
+⇒ Against a `GSSAPIAuthentication yes` + `PubkeyAuthentication no` +
+`PasswordAuthentication no` server, Desktop can never authenticate. It exhausts its
+methods, then falls back to prompting for a password the server will also refuse.
+🧪 Observed against a ByteDance devbox; the system `ssh` succeeded from the same host
+in the same minute over `gssapi-with-mic`.
+
+### There is a second, OpenSSH-binary transport — behind an account flag 🔬
+
+An `OpenSSHConnection` class exists that drives the real `ssh` binary with
+`ControlMaster`, `-S <socket>`, `BatchMode=yes`, `ForwardAgent=no`, and (for the master
+connection) `GSSAPIDelegateCredentials=no`. That path **would** support Kerberos.
+
+Which transport runs is decided at connect time. 🔬 Un-minified from `app.asar`
+(chunk `index2.chunk-zHVVshID.js`):
+
+```js
+const SSH_TRANSPORT_ENV_VAR = 'CLAUDE_DESKTOP_SSH_TRANSPORT'    // was: t
+
+// The env override is honored ONLY on internal ("Nest") or dev builds.
+function sshTransportOverrideFromEnv() {                        // was: n
+  if (!isInternalBuild() && !isDevBuild()) return undefined     // was: e.nC(), e.eC()
+  const value = process.env[SSH_TRANSPORT_ENV_VAR]
+  return value === 'openssh' || value === 'ssh2' ? value : undefined
+}
+
+function selectSshTransport() {                                 // was: p
+  if (isFeatureEnabled('291584251')) return 'ssh2'   // kill switch wins over everything
+  const override = sshTransportOverrideFromEnv()
+  if (override !== undefined) return override
+  return isFeatureEnabled('3946462706') ? 'openssh' : 'ssh2'    // rollout flag
+}
+
+// Only wait on the flag service when no env override settles it locally.
+function transportDependsOnAccountFlags() {                     // was: u
+  return sshTransportOverrideFromEnv() === undefined
+}
+```
+
+<details><summary>raw minified</summary>
+
+```js
+var t=`CLAUDE_DESKTOP_SSH_TRANSPORT`;function n(){if(!e.nC()&&!e.eC())return;let n=process.env[t];return n===`openssh`||n===`ssh2`?n:void 0}
+function p(){if(e.By(`291584251`))return`ssh2`;let t=n();return t===void 0?e.By(`3946462706`)?`openssh`:`ssh2`:t}
+function u(){return n()===void 0}
+```
+</details>
+
+⇒ On a public release build, `CLAUDE_DESKTOP_SSH_TRANSPORT=openssh` is a **no-op**.
+The gate waits up to 5s (`a=5e3`) for flags to settle, showing "Loading settings…".
+Telemetry `desktop_ssh_connected` reports `ssh_transport` and `ssh_transport_flag_state`
+(`fresh` | `cached` | `none`).
+
+### `ProxyCommand` is supported, `ProxyJump` is not 🔬
+
+The `ssh2` path parses `~/.ssh/config` (it logs how many `identityFiles` it resolved) and
+honors `ProxyCommand`, spawning it as `sh -c <command>` and using its stdio as the socket.
+It expands `%h`, `%p`, `%r`, `%n`. `ProxyJump` throws:
+
+> `SSH host <host> uses ProxyJump (<value>), which is not yet supported. Consider using ProxyCommand instead.`
+
+⚠️ `sshHostAllowlist` validates only the **resolved** `HostName`. The bundle itself warns
+that a `ProxyCommand`/`ProxyJump` can therefore reach elsewhere — its own comment points at
+`assertResolvedSshTargetAllowed` for the threat model.
+
+### Desktop logs every SSH attempt 🔬
+
+`~/Library/Logs/Claude/ssh.log` — full `ssh2` packet trace (`Outbound: Sending
+USERAUTH_REQUEST (...)`, `Inbound: Received USERAUTH_FAILURE (...)`), plus
+`[RemoteServerController]` connect/reconnect/flap decisions and `[BinaryDeployment]`.
+Sibling logs: `main.log`, `mcp.log`, `coworkd.log`, `cowork_vm_{node,swift}.log`.
+
+Reconnect behavior seen there: auth failures abort auto-reconnect after **1** attempt
+unless live processes exist; repeated drops trigger flap detection with exponential
+backoff (`FLAP_BACKOFF_BASE_MS`, `FLAP_BACKOFF_CAP_MS`, `FLAP_WINDOW_MS`).
+
+### Other Desktop env vars found 🔬
+
+`CLAUDE_DESKTOP_IS_NEST_BUILD`, `CLAUDE_DESKTOP_BACKGROUND_LAUNCH`,
+`CLAUDE_DESKTOP_GITHUB_MCP_BINARY`, `CLAUDE_DESKTOP_LOCAL_FRAME_SHELL`,
+`CLAUDE_DESKTOP_RESOLVING_ENVIRONMENT`.
+
+### Recipe
+
+```sh
+ASAR=/Applications/Claude.app/Contents/Resources/app.asar
+rg --text --only-matching --no-filename '.{300}<symbol>.{600}' "$ASAR" | head
+```
