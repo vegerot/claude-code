@@ -616,6 +616,139 @@ Superseded versions are retained in `~/.local/share/claude/versions/` (2.1.234 �
 present, ~310–317MB each), with `~/.local/bin/claude` symlinked to the active one. ⇒ A rollback
 is just repointing that symlink, and the directory grows ~300MB per version kept.
 
+### Workspace trust gates Remote Control 🧪🔬
+
+🧪 `claude remote-control` refuses to start in a directory Claude has never run in:
+
+```
+Error: Workspace not trusted. Please run `claude` in <dir> first to review and accept
+the workspace trust dialog.
+```
+
+🔬 The binary holds a **second, harsher variant** for `$HOME`:
+
+> `Error: Workspace not trusted. <dir> is your home directory, and for security
+> home-directory trust is never saved, so running `claude` here first won't help.
+> Run `claude rc` from a project directory instead (run `claude` there once to accept
+> the trust dialog).`
+
+⇒ Two consequences. Home-directory trust is **never persisted**, by design. And there is
+**no CLI flag** to pre-trust a directory — the only non-interactive route is the config
+file. 🔬 Adjacent config keys in the same string table: `setTrustAccepted`, `projects`,
+`hasTrustDialogAccepted`.
+
+🧪 Writing this into `~/.claude.json` makes `remote-control` start without the dialog:
+
+```json
+{ "projects": { "/abs/path/to/repo": { "hasTrustDialogAccepted": true } } }
+```
+
+The path must be the **resolved** path. On a box where `$HOME` is a symlink
+(`/home/user` → `/data00/home/user`), the error message prints the resolved form; that is
+the key the config wants.
+
+🔬 `claude --help` on `-p/--print`: *"The workspace trust dialog is skipped when Claude is
+run in non-interactive mode."* ⇒ trust is an interactive-only gate, so `--print` sessions
+never hit it and never record acceptance either.
+
+### `claude rc` is a real subcommand 🔬
+
+🧪 `claude rc --help` prints the full Remote Control help (`Remote Control - Control local
+sessions from claude.ai/code or the Claude mobile app`). It is **not** in the `Commands:`
+list of `claude --help`, alongside the already-noted hidden `remote-control`.
+
+⚠️ Do not confuse it with the `--rc` *flag*, documented above as an alias for
+`--remote-control`. `claude rc` is the **server**; `claude --rc` is an interactive session
+that is also remotely controllable. The binary's own home-directory trust error recommends
+`claude rc`, which is the strongest evidence it is a supported spelling rather than a leftover.
+
+### Server startup: consent, banner, runtime keys 🧪🔬
+
+🧪 First run in a directory prompts once:
+
+```
+Enable Remote Control? (y/n)
+```
+
+🔬 The nearby config key is `remoteDialogSeen`, so the consent is remembered, not re-asked.
+🔬 Other strings in the same block: `Choose [1/2] (default: 1): `, and the analytics events
+`tengu_bridge_started` / `tengu_bridge_spawn_mode_toggled`.
+
+🧪 On success it prints a banner, and the environment URL is the shareable handle:
+
+```
+·✔︎· Connected · dotfiles
+    Capacity: 1/32 · New sessions will be created in an isolated worktree
+    devbox-dotfiles
+Continue coding in the Claude mobile app or
+https://claude.ai/code?environment=env_0146ofaCdJYkt9Pdc3SkUb66
+space to show QR code · w to toggle spawn mode
+```
+
+🔬 The full runtime-key string set is `space to show QR code` / `space to hide QR code` /
+` w to toggle spawn mode`, plus the status words `Reconnecting`, `retrying in `,
+`disconnected `, `Attached`, and a `single-session` variant reading
+`Single session <name> exits when complete`. ⇒ `--spawn=session` renders a different banner.
+
+### `sshConfigs` — the Desktop/CLI SSH environment feature 🔬
+
+🔬 The settings schema is in the binary. Un-minified below; original single-letter names in
+`// was:` comments. `O()` is a string schema, `zt()` boolean, `Qe()` number, `$r([…])` enum —
+read off neighbouring settings in the same table. `mt(ye({…}))` is an array-of-object, inferred
+from the plural key name and the "configurations" wording.
+
+```ts
+sshConfigs: z.array(                                   // was: mt
+  z.object({                                           // was: ye
+    id: z.string()
+      .describe('Unique identifier for this SSH config. Used to match configs across settings sources.'),
+    name: z.string()
+      .describe('Display name for the SSH connection'),
+    sshHost: z.string()
+      .describe('SSH host in format "user@hostname" or "hostname", or a host alias from ~/.ssh/config'),
+    sshPort: z.number().int().optional()               // was: Qe
+      .describe('SSH port (default: 22)'),
+    sshIdentityFile: z.string().optional()
+      .describe('Path to SSH identity file (private key)'),
+    startDirectory: z.string().optional()
+      .describe(
+        'Default working directory on the remote host. Supports tilde expansion (e.g. ~/projects). ' +
+        'If not specified, defaults to the remote user home directory. Can be overridden by the ' +
+        '[dir] positional argument in `claude ssh <config> [dir]`.',
+      ),
+  }),
+).optional()
+  .describe(
+    'SSH connection configurations for remote environments. Typically set in managed settings ' +
+    'by enterprise administrators to pre-configure SSH connections for team members.',
+  )
+```
+
+Three things fall out of that:
+
+1. The key is **`sshIdentityFile`**, not `identityFile`. Easy to get wrong.
+2. A `claude ssh <config> [dir]` command exists. 🧪 It is **not registered on this
+   `linux-x64` build** — `claude --help` lists no `ssh` under `Commands:`. ⇒ It is a
+   *client-side* command (Desktop / macOS build); the Linux box is only ever the target.
+3. Despite the "enterprise administrators" wording, the schema lives in the ordinary user
+   settings table, so a personal user can set it in `~/.claude/settings.json`.
+
+🔬 How the remote session gets credentials, from a warning string:
+
+> ` ANTHROPIC_UNIX_SOCKET is set (claude ssh remote), and the local proxy is API-key-authed.`
+> ` Unset ANTHROPIC_API_KEY / apiKeyHelper / ANTHROPIC_AUTH_TOKEN `
+
+⇒ `claude ssh` forwards a **unix-domain socket** to the remote and points the remote's API
+client at it, so the remote does not need its own login. The warning fires when that proxy is
+API-key-authed while the remote also has its own key set.
+
+🔬 One sibling string, worth knowing before you plan a deployment:
+
+> ` This session is connected through an enterprise cloud gateway (set up via /login), which
+> does not support Remote Control.`
+
+⇒ Gateway auth and Remote Control are mutually exclusive.
+
 ---
 
 ## Claude Desktop 1.32885.1 (macOS)
