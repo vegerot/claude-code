@@ -860,3 +860,220 @@ backoff (`FLAP_BACKOFF_BASE_MS`, `FLAP_BACKOFF_CAP_MS`, `FLAP_WINDOW_MS`).
 ASAR=/Applications/Claude.app/Contents/Resources/app.asar
 rg --text --only-matching --no-filename '.{300}<symbol>.{600}' "$ASAR" | head
 ```
+
+---
+
+## 2.1.246
+
+Recorded **2026-08-25** on the veLinux devbox.
+
+```
+Running: native (2.1.246)
+Commit:  1ba9d2211ae1
+Platform: linux-x64
+Path:    ~/.local/share/claude/versions/2.1.246
+```
+
+### Claude in Chrome: what actually turns it on
+
+The question that produced this section: can a `claude remote-control` server give its
+spawned sessions the browser tools? There is no flag for it, so the answer had to come
+out of the binary.
+
+🧪 The subcommand rejects the flag outright:
+
+```
+$ claude remote-control --chrome
+Error: Unknown argument: --chrome
+```
+
+🔬 `--chrome` and `--no-chrome` are registered on the **top-level** command only:
+
+```js
+.option("--chrome","Enable Claude in Chrome integration")
+.option("--no-chrome","Disable Claude in Chrome integration")
+```
+
+🧪 So `claude --chrome --remote-control [name]` parses — but that is the single-session
+form. The multi-session server (`claude remote-control` / `claude rc`) has no spelling for
+it. 📖 anthropics/claude-code#74671 asks for exactly this and is open.
+
+#### The enable predicate 🔬
+
+*Un-minified.* Original single-letter names in `// was:` comments. The helpers `E()`,
+`d()`, and `_()` are the chunk's own; `E()` is an OAuth-scope check and `d()` reads the
+global config. **`_()` I did not resolve** — it is a negative guard that sits between the
+env var and the config key.
+
+```js
+function isClaudeInChromeEnabled(flagValue) {          // was: Je(e)
+  // 1. OAuth scope. The message names the accepted scopes, which is the useful part.
+  if (!hasAcceptedOAuthScope()) {                      // was: E()
+    log("[Claude in Chrome] Disabled: OAuth token has no scope accepted by " +
+        "/api/oauth/validate (needs user:profile, user:office, or user:ccr_inference; " +
+        "env-var and setup-token sessions default to user:inference only)")
+    return false
+  }
+  // 2. The CLI flag, both ways.
+  if (flagValue === true)  return true                 // --chrome
+  if (flagValue === false) return false                // --no-chrome
+  // 3. The environment variable, both ways. CFC = Claude For Chrome.
+  if (env.CLAUDE_CODE_ENABLE_CFC === true)  return true
+  if (env.CLAUDE_CODE_ENABLE_CFC === false) return false
+  // 4. An unresolved guard.
+  if (unresolvedGuard()) return false                  // was: _()
+  // 5. The /chrome menu's "Enabled by default" toggle, from the global config.
+  const config = getGlobalConfig()                     // was: d()
+  if (config.claudeInChromeDefaultEnabled !== undefined)
+    return config.claudeInChromeDefaultEnabled
+  return false
+}
+```
+
+<details><summary>Original minified form, as it appears in the binary</summary>
+
+```js
+function Je(e){if(!E())return i("[Claude in Chrome] Disabled: OAuth token has no scope accepted by /api/oauth/validate (needs user:profile, user:office, or user:ccr_inference; env-var and setup-token sessions default to user:inference only)"),!1;if(e===!0)return!0;if(e===!1)return!1;if(m.CLAUDE_CODE_ENABLE_CFC===!0)return!0;if(m.CLAUDE_CODE_ENABLE_CFC===!1)return!1;if(_())return!1;let o=d();if(o.claudeInChromeDefaultEnabled!==void 0)return o.claudeInChromeDefaultEnabled;return!1}
+```
+
+</details>
+
+⇒ **`CLAUDE_CODE_ENABLE_CFC=1` is the flag's replacement for any command that will not take
+`--chrome`.** A `remote-control` server started with it in its environment passes it to every
+child session it spawns, since 📦 `sessionRunner.ts` spawns plain child `claude` processes.
+
+⚠️ Not verified end-to-end here: the devbox has no Chrome extension installed, so no session
+on it has actually wired the MCP server. 🧪 What was verified is that the variable reaches the
+server process (`/proc/<pid>/environ` on three restarted `claude remote-control` servers).
+
+⚠️ Precedence detail worth keeping: the env var is read **before** the config key, and both
+`true` and `false` are honoured at each step. `CLAUDE_CODE_ENABLE_CFC=false` therefore beats
+the `/chrome` toggle, and `--no-chrome` beats the env var.
+
+#### Wiring, and what suppresses it 🔬
+
+*Un-minified* from the startup path. `parsedOptions` is Commander's option object.
+
+```js
+const chromeEnabled =                                   // was: Ye
+  isClaudeInChromeEnabled(parsedOptions.chrome) && secondGate()   // was: Iu(Kt.chrome) && mo()
+
+const deniedByPolicy   = isMcpServerDenied(serverName, serverConfig())   // was: qo
+const enterpriseBlocks = hasEnterpriseMcpConfig() || deniedByPolicy      // was: Br
+
+// Note both skips require the opt-in to have been IMPLICIT: an explicit --chrome or
+// CLAUDE_CODE_ENABLE_CFC=1 does not take these branches.
+const skipForPolicy =                                   // was: $r
+  chromeEnabled && parsedOptions.chrome !== true &&
+  env.CLAUDE_CODE_ENABLE_CFC !== true && enterpriseBlocks
+
+const skipForSafeMode =                                 // was: Am
+  chromeEnabled && parsedOptions.chrome !== true &&
+  env.CLAUDE_CODE_ENABLE_CFC !== true && isSafeMode()   // was: oe()
+```
+
+🔬 The three messages that come out of it, verbatim:
+
+```
+[Claude in Chrome] Skipping chrome wiring: blocked by enterprise MCP config or managed deniedMcpServers policy
+[Claude in Chrome] Skipping chrome wiring: --safe-mode disables MCP
+MCP server blocked by enterprise policy: <name>
+```
+
+⇒ Ask explicitly and a policy block becomes a **warning** rather than a silent skip: the
+`skipFor*` branches are bypassed and the flow falls through to the third message.
+
+`secondGate()` (`mo()`) is an additional condition I did not identify; three different
+functions named `mo` exist in the bundle, so the name alone does not resolve it.
+
+#### The MCP server is the binary talking to itself 🔬
+
+```js
+function getClaudeInChromeMcpServerConfig() {           // was: xe()
+  return {
+    type: "stdio",
+    command: process.execPath,                          // the claude binary
+    args: ["--claude-in-chrome-mcp"],
+    scope: "dynamic",
+  }
+}
+```
+
+🔬 `process.argv[2] === "--claude-in-chrome-mcp"` is dispatched at the very top of the
+entrypoint, before the CLI is built, to `runClaudeInChromeMcpServer` (telemetry:
+`cli_claude_in_chrome_mcp_path`). A sibling argv mode `--chrome-native-host` is what the
+installed native-messaging manifest points at.
+
+🔬 Native-messaging install, done as a side effect of wiring:
+
+```json
+{
+  "name": "com.anthropic.claude_code_browser_extension",
+  "description": "Claude Code Browser Extension Native Host",
+  "path": "<claude binary> --chrome-native-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://fcoeoabgfenejglbffodgkkbkcdhcgfn/"]
+}
+```
+
+- File name is `<name>.json`; on Windows the directory is
+  `%APPDATA%` (or `<home>/AppData/Local`) + `Claude Code/ChromeNativeHost`, otherwise a
+  per-browser list.
+- First-time install opens `https://clau.de/chrome/reconnect` in the browser.
+- 🔬 When a session runs with permissions bypassed, the MCP server is handed
+  `CLAUDE_CHROME_PERMISSION_MODE=skip_all_permission_checks` in its env — the browser
+  tools have their own permission mode, separate from the session's.
+
+#### `isRemoteMode` is about **cloud** sessions, not Remote Control 🔬
+
+Two unrelated "remote" concepts share the word, and only one of them touches Chrome.
+
+```js
+isRemoteMode: env.CLAUDE_CODE_REMOTE || isCloudSession()   // was: V.CLAUDE_CODE_REMOTE || Ll()
+```
+
+*Un-minified*, the predicate that consumes it:
+
+```js
+function shouldSuppressChromeOffer({                    // was: to({…}), called as Sp({…})
+  isSSHPending, isRemoteMode, hasTeleport, isSafeMode,
+  permissionMode, isBypassPermissionsModeAvailable, teammateAgentId,
+}) {
+  return isSSHPending || isRemoteMode || hasTeleport || isSafeMode ||
+    permissionMode === "bypassPermissions" ||
+    (permissionMode === "plan" && isBypassPermissionsModeAvailable) ||
+    teammateAgentId !== undefined
+}
+```
+
+🔬 Its only use at the call site is `suppress ? false : offerClaudeInChrome` — it gates the
+**onboarding offer**, never the tools. ⇒ A `claude remote-control` session is an ordinary
+local session for Chrome purposes: the browser it drives is the one on the machine running
+the server, not one on the phone that is driving the session. A **cloud** session
+(`CLAUDE_CODE_REMOTE`) is the case with no local browser.
+
+#### Config keys and tool prefixes 🔬
+
+Global config (`~/.claude.json`) keys in this area:
+
+```
+claudeInChromeDefaultEnabled        the /chrome "Enabled by default" toggle
+hasCompletedClaudeInChromeOnboarding
+cachedChromeExtensionInstalled      lets startup skip a probe
+chromeExtension.pairedDeviceId      a browser paired on ANOTHER device
+```
+
+🔬 The permission layer knows four tool-name prefixes for the same feature, plus a
+`remote-devices` carrier:
+
+```js
+["mcp__claude-in-chrome__", "mcp__Claude_in_Chrome__",
+ "mcp__remote-devices__claude-in-chrome__", "mcp__remote-devices__Claude_in_Chrome__",
+ "mcp__Claude_Preview__", "mcp__Claude_Browser__", "mcp__remote-devices__Claude_Browser__"]
+```
+
+⇒ Together with `chromeExtension.pairedDeviceId`, that is the seam for driving a browser
+attached to a *different* machine than the one running Claude. Not exercised here.
+
+🔬 The `/chrome` menu's own entries: `install-extension`, `select-browser`, `reconnect`,
+`toggle-default` (rendered as `Enabled by default: Yes|No`).
