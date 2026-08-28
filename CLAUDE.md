@@ -51,6 +51,8 @@ How to write it:
 Do not add findings that came only from the docs; those are already published and change
 without notice. This file is for what we had to dig out.
 
+At the end of the conversation, you may also want to update `~/ai-conversations/claude-learning/`.
+
 ## Commands
 
 Repo root (checks against the leaked `src/`):

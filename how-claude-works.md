@@ -1077,3 +1077,455 @@ attached to a *different* machine than the one running Claude. Not exercised her
 
 🔬 The `/chrome` menu's own entries: `install-extension`, `select-browser`, `reconnect`,
 `toggle-default` (rendered as `Enabled by default: Yes|No`).
+
+### Transcript token accounting — what the JSONL really records 🧪🔬📦
+
+Findings from writing `transcript-usage.ts`, a report that re-derives `/context` and the
+session cost from the raw transcript. Source and tests live in
+`~/code/github.com/vegerot/coding-model-router/tools/transcript-usage.{ts,test.ts}`;
+the `context-deep` skill (`~/.claude/skills/context-deep/SKILL.md`) is the wrapper.
+All 🧪 claims below were re-verified on 2.1.246 against a live session transcript.
+
+#### The shape of a conversation on disk
+
+🧪 One session is **one JSONL file** — `~/.claude/projects/<sanitized-cwd>/<session-id>.jsonl`,
+append-only, one JSON object per line, no wrapping array and no trailing comma. See
+[Transcript storage](#transcript-storage) under 2.1.237 for the path transform and retention.
+
+⇒ Append-only means the file is a **log, not a document**. Rewound branches, abandoned tool
+calls, and superseded state all stay in it. The live conversation is a *subset* you have to
+reconstruct (see `parentUuid` below).
+
+🧪 Rows fall into two families. Only the first is the conversation:
+
+| Family | `type` values | Has `uuid` / `parentUuid` / `timestamp` |
+|---|---|---|
+| **Conversation entries** | `user`, `assistant`, `attachment`, `system` | yes |
+| **Session state** | `mode`, `last-prompt`, `ai-title`, `atis-latch`, `bridge-session`, `file-history-snapshot` | no |
+
+🧪 Session-state rows are tiny bookmarks re-appended whenever the value changes, keyed only by
+`sessionId`. A session that switched mode 11 times has 11 `mode` rows; the last one wins.
+
+```jsonc
+{"type":"mode","mode":"normal","sessionId":"d3554ff7-…"}          // permission mode
+{"type":"last-prompt","lastPrompt":"…","leafUuid":"784f67ee-…"}   // resume bookmark
+{"type":"ai-title","aiTitle":"Consolidate transcript usage…"}      // the picker's label
+{"type":"bridge-session","bridgeSessionId":"…","lastSequenceNum":…}// Remote Control cursor
+{"type":"file-history-snapshot","messageId":"…","snapshot":{…}}    // rewind/undo checkpoint
+{"type":"atis-latch","atis":"v1.…"}                                // opaque token
+```
+
+⇒ `leafUuid` on `last-prompt` is the anchor `--continue` resumes from. `ai-title` is why the
+session picker shows prose instead of a UUID.
+
+##### The envelope every conversation entry carries
+
+🧪 On 2.1.246 these keys appear on `user`, `assistant`, and `attachment` rows alike:
+
+| Field | Why it matters |
+|---|---|
+| `uuid` | This entry's id |
+| `parentUuid` | The entry before it. `null` only at the root |
+| `type` | `user` / `assistant` / `attachment` / `system` |
+| `timestamp` | ISO 8601, UTC |
+| `sessionId` | Also duplicated as `session_id` on some rows |
+| `version` | The Claude Code build that wrote the line — one file can span upgrades |
+| `cwd`, `gitBranch` | Where the turn ran |
+| `isSidechain` | `true` ⇒ a subagent wrote it, not the main loop |
+| `userType` | `external` for a real person |
+| `entrypoint` | How the session started (`cli`, …) |
+
+⇒ `parentUuid` makes the file a **tree, not a list**. Walking it backwards from the last
+`assistant` entry yields exactly the conversation that was last sent; any entry not on that
+chain is a branch that was rewound and is still costing disk but not context.
+
+##### Per-type payload
+
+🧪 **`assistant`** — adds `message` (`{id, model, content[], usage}`), `effort`, and
+`requestId`. `message.content` is the block array: `text`, `thinking`, `tool_use`.
+
+🧪 **`user`** — `message.content` is either a plain **string** (a typed prompt) or a block
+array holding **`tool_result`** blocks. A tool result is a *user* row, because that is how the
+API models it. Extra fields worth knowing:
+
+| Field | Meaning |
+|---|---|
+| `toolUseResult` | Sibling of `message`. The **full local** result record |
+| `sourceToolAssistantUUID` | The `assistant` entry whose `tool_use` this answers |
+| `promptId`, `promptSource` | `promptSource: "typed"` for a real keystroke prompt |
+| `origin` | `{"kind":"human"}` — separates a person from a replayed/automated prompt |
+| `permissionMode` | The mode in force when the prompt was sent, e.g. `auto` |
+| `isMeta` | System-injected pseudo-prompt, not something the user typed |
+| `isCompactSummary` | This row is a compaction summary standing in for older turns |
+
+⚠️ 🧪 **`toolUseResult` is not what the model saw.** It is the untruncated local record;
+`message.content` holds the possibly-truncated version actually sent. Measured in one session:
+138,028 bytes of `toolUseResult` against 108,754 bytes of matching `content` (1.27x), and a
+single `Bash` row where a large output was spilled to a file stored **32,061 bytes locally
+against 2,457 sent** — 13x. A parser that reads `toolUseResult` for token accounting will
+overcount, sometimes wildly.
+
+🧪 **`attachment`** — `attachment: {type, …}`, no `message` at all. This is context Claude Code
+injects around the conversation: `skill_listing`, `deferred_tools_delta`, `async_hook_response`,
+`total_tokens_reminder`, and more. Field names differ per subtype.
+
+🧪 **`system`** — local notices, keyed by `subtype` (`local_command`, `stop_hook_summary`,
+`turn_duration`), usually `isMeta: true`. Carries `level` (`info` / `suggestion`) and subtype
+specific fields such as `durationMs`, `messageCount`, `hookErrors`, `toolUseID`.
+
+##### What actually fills the file
+
+🧪 One 498KB session, by row type:
+
+```
+type                     rows      bytes
+user                       26    260,235   ← tool results + toolUseResult duplication
+attachment                117    128,051
+assistant                  38     86,133
+last-prompt                10      3,243
+bridge-session             11      2,926
+atis-latch                 10      2,710
+system                      3      2,452
+ai-title                   10      1,320
+mode                       11        902
+file-history-snapshot       3        705
+```
+
+⇒ `user` rows dominate, and they are almost entirely tool output, not typing. `assistant` rows
+are a sixth of the file despite being the only ones that cost output tokens.
+
+⇒ **File size is a bad proxy for context cost**, in both directions: `toolUseResult` inflates
+it, while the system prompt, tool definitions, memory, and skills cost tokens and appear
+nowhere.
+
+#### One API response writes many JSONL lines — dedupe by `message.id`
+
+🧪 Claude Code writes **one line per content block**, and every one of those lines repeats
+the *same* `message.usage` object. A thinking + text + tool_use turn is 3 lines, all carrying
+the full token count of the request.
+
+```sh
+jq -r 'select(.type=="assistant") | .message.id' "$T" | sort | uniq -c | sort -rn | head
+#       3 msg_011CeQ8m8x1nasj2RkdABA9C
+#       3 msg_011CeQ8kUeuEQCjmsFAYA8X2
+```
+
+⇒ Summing `usage` per line **overcounts by 2-3x**. Dedupe on `message.id` first. In the
+session that produced this note, 26 assistant lines were 9 real API messages.
+
+⇒ `model: "<synthetic>"` marks a local notice (an error, a cancel, an interrupt) that no API
+call produced. Its `usage` is all zeros, but it still occupies an `assistant` line. Skip it.
+
+#### The `usage` block carries more than the four public counters
+
+🧪 A real 2.1.246 `message.usage`, reformatted:
+
+```jsonc
+{
+  "input_tokens": 2,
+  "cache_creation_input_tokens": 1557,
+  "cache_read_input_tokens": 86802,
+  "output_tokens": 612,
+  "output_tokens_details": { "thinking_tokens": 117 },
+  "server_tool_use": { "web_search_requests": 0, "web_fetch_requests": 0 },
+  "service_tier": "standard",
+  // The TTL split. A 1h write costs 2x input, a 5m write 1.25x, so the total alone
+  // is not enough to price a message.
+  "cache_creation": { "ephemeral_1h_input_tokens": 1557, "ephemeral_5m_input_tokens": 0 },
+  "inference_geo": "not_available",
+  // Per-request breakdown when one assistant turn made several API round trips.
+  "iterations": [ { "input_tokens": 2, "output_tokens": 612, "type": "message", /* ... */ } ],
+  // "fast" here is /fast mode, which bills at a premium tier. Recorded per message.
+  "speed": "standard"
+}
+```
+
+⇒ `thinking_tokens` is a **subset** of `output_tokens`, not an addition. Answer tokens are
+`output_tokens - thinking_tokens`.
+
+⇒ Older transcripts have `cache_creation_input_tokens` but no `cache_creation` split. Charge
+those at the 5m rate.
+
+#### Thinking is billed but stored empty
+
+🧪 On Opus 5 every stored `thinking` block has `thinking: ""` and a non-empty `signature`:
+
+```sh
+jq -r '.message.content[]? | select(.type=="thinking")
+       | "thinking_len=\(.thinking|length) sig_len=\(.signature|length)"' "$T"
+# thinking_len=0 sig_len=488
+# thinking_len=0 sig_len=2440
+```
+
+⇒ Any tool that measures context by reading block text reports **0 thinking tokens** while
+the API billed thousands. The signature is kept so the block can be replayed; the reasoning
+text is not. Do not read a `0` here as "thinking was free".
+
+#### Where the per-message context size comes from
+
+🧪 `effort` (`low | medium | high | xhigh | max`) sits on the `assistant` row, not inside
+`message`. It is the only place the reasoning effort of a single message is recorded.
+
+⇒ The context Claude Code held for one request is
+`input_tokens + cache_read_input_tokens + cache_creation_input_tokens` of that assistant
+message. There is no separate "context size" field.
+
+#### Context estimation: 4 bytes per token, and a flat 2000 for images
+
+📦 `src/services/tokenEstimation.ts:203` — un-minified, this is the whole estimator:
+
+```ts
+export function roughTokenCountEstimation(content: string, bytesPerToken: number = 4): number {
+  return Math.round(content.length / bytesPerToken)
+}
+```
+
+📦 `bytesPerTokenForFileType()` (same file) drops that to **2** for `json`, `jsonl`, and
+`jsonc`, with the reason recorded: "Dense JSON has many single-character tokens (`{`, `}`,
+`:`, `,`, `"`) which makes the real ratio closer to 2 rather than the default 4." The
+comment says an underestimate "can let an oversized tool result slip into the conversation".
+
+📦 `roughTokenCountEstimationForBlock()` (`tokenEstimation.ts:391`) returns a **flat 2000**
+for `image` and `document` blocks, and the comment explains why the catch-all must not see
+them: "a 1MB PDF is ~1.33M base64 chars → ~325k estimated tokens, vs the ~2000 the API
+actually charges."
+
+⇒ So `/context` image and PDF numbers are a constant, not a measurement. Real cost is
+`⌈w/28⌉ × ⌈h/28⌉` patches after the documented downscale — measurable exactly from the PNG
+IHDR / JPEG SOF / GIF / WebP header in the stored base64, which is what `transcript-usage.ts`
+does.
+
+⇒ `tool_use` is estimated as `name + jsonStringify(input)`, `tool_result` recurses into its
+own `content`, and anything unrecognized falls through to `jsonStringify(block)`.
+
+#### Hook stdout is local — only two fields reach the model
+
+🧪 An `async_hook_response` attachment stores `stdout`, `stderr`, `exitCode`, `processId`,
+`toolUseID`, `durationMs`. **None of that is sent.** Only
+`response.systemMessage` and `response.hookSpecificOutput.additionalContext` are.
+
+🧪 Measured: 52 `async_hook_response` attachments in one session, **0 tokens** of context.
+
+⇒ A chatty hook is free as long as it stays silent in `response`. This contradicts the
+intuition that hook output costs context.
+
+#### Attachment types are where the invisible context lives
+
+🧪 `type: "attachment"` entries, by subtype, from one 2.1.246 session:
+
+```
+attachment subtype          entries   tokens
+skill_listing                     1    3,844
+deferred_tools_delta              1    2,529
+mcp_instructions_delta            1      784
+agent_listing_delta               1      637
+total_tokens_reminder             7      153
+hook_success                      1       27
+auto_mode                         1        6
+async_hook_response              52        0
+```
+
+⇒ `skill_listing` and `deferred_tools_delta` together cost ~6.4k tokens at session start,
+before any work happens. That is the price of installed skills plus the deferred-tool roster.
+
+🧪 `total_tokens_reminder` is the mechanism behind the budget line the model sees:
+`{"type":"total_tokens_reminder","text":"<total_tokens>14912564 tokens left</total_tokens>"}`.
+
+#### Two thirds of a real context is not in the transcript
+
+🧪 Live composition of the session that produced this note, at 91,545 tokens of context:
+
+```
+actual context:      91,545
+estimated messages:  31,146  (34%)
+unmeasured:          60,399  (66%)  = system prompt + tool defs + memory + skills + estimate error
+```
+
+⇒ The transcript stores the conversation, never the request preamble. System prompt, tool
+definitions, `CLAUDE.md` memory, and skill bodies are reconstructed nowhere in the file, so
+any transcript-derived report can only show them as a residual. That residual also absorbs
+every error in the 4-bytes-per-token estimate, so do not quote it as exact.
+
+⇒ Practical consequence: a session that "feels full" early is usually paying the fixed
+preamble, not the messages. Trimming tool results helps the 34%, not the 66%.
+
+#### Recipe
+
+```sh
+# The current session's transcript. CLAUDE_CODE_SESSION_ID is set in every session.
+T="$(fd --type f "${CLAUDE_CODE_SESSION_ID}.jsonl" ~/.claude/projects)"
+
+# Real API message count, not line count.
+jq -r 'select(.type=="assistant" and .message.model != "<synthetic>") | .message.id' "$T" \
+  | sort -u | wc -l
+
+# Everything above, as a report.
+transcript-usage "$T"          # add --json to compute on the numbers
+```
+
+⚠️ Claude Code transcripts only. Codex, Trae CLI, and opencode use a different JSONL shape
+(`response_item` / `session_meta` events, no `type: "user"` / `"assistant"` with a `message`
+field), so pointing a Claude-Code parser at one silently undercounts instead of erroring.
+
+### Computer use: `--computer-use-mcp` is an entrypoint, not a switch 🔬📦🧪📖
+
+Recorded **2026-08-26** on the work MacBook, same version (2.1.246).
+
+The question: is there a config setting that permanently enables computer use, the way
+`permissions.defaultMode` permanently enables bypass mode? Answering it from `src/` alone
+produced a **wrong answer**, so the correction matters more than the finding.
+
+**`--computer-use-mcp` does not enable anything.** 📦 `src/entrypoints/cli.tsx:86` matches it
+positionally — `process.argv[2] === '--computer-use-mcp'` — and dispatches to
+`runComputerUseMcpServer()`. It is the subprocess entrypoint for the MCP server itself, written
+into the child args by `src/utils/computerUse/setup.ts:36`. Running `claude --computer-use-mcp`
+by hand just starts a bare stdio MCP server. It is the same shape as the neighbouring
+`--chrome-native-host` branch.
+
+Amusingly, that spawn never happens: `setup.ts` says the `command`/`args` are *"never spawned —
+client.ts intercepts by name and uses the in-process server. The config just needs to exist with
+type 'stdio' to hit the right branch."* The MCP wrapper is not ceremony either — the comment
+notes the API backend detects `mcp__computer-use__*` tool names and injects a CU availability
+hint into the system prompt, which built-in tool names would not trigger.
+
+**How it is actually enabled** 📖🧪 — `/mcp` → select `computer-use` → **Enable**. That persists
+**per project**, in `~/.claude.json`, not `settings.json`:
+
+```json
+"projects": {
+  "/path/to/project": { "enabledMcpServers": ["computer-use"] }
+}
+```
+
+🧪 Confirmed by reading `~/.claude.json` directly: four projects carried the entry, and the
+`mcp__computer-use__*` tools (24 of them) loaded into the running session. There is no global
+key — `enabledMcpjsonServers` governs `.mcp.json` servers, not this built-in one.
+
+#### ⚠️ Where `src/` is stale — and how the binary check went wrong
+
+📦 `src/utils/computerUse/gates.ts` describes an **ant-only dogfooding gate**: GrowthBook
+`tengu_malort_pedway` defaulting to `enabled: false`, a Max/Pro subscription check, and an
+`ALLOW_ANT_COMPUTER_USE_MCP=1` escape hatch for ants whose shell inherited monorepo dev config
+(detected via `MONOREPO_ROOT_DIR`).
+
+📖 That is no longer the shipping state. Computer use is a **public research preview** — macOS
+only in the CLI, Pro or Max, claude.ai auth (not Bedrock/Vertex/Foundry), interactive sessions
+only, v2.1.85+. See <https://code.claude.com/docs/en/computer-use>.
+
+🔬 The trap: `strings` on the installed 2.1.246 still finds both gate names.
+
+```bash
+BIN=~/.local/share/claude/versions/2.1.246
+for s in computer-use-mcp tengu_malort_pedway ALLOW_ANT_COMPUTER_USE_MCP request_access; do
+  printf '%-32s %s\n' "$s" "$(strings "$BIN" | grep --count --fixed-strings "$s")"
+done
+# computer-use-mcp                 3
+# tengu_malort_pedway              2
+# ALLOW_ANT_COMPUTER_USE_MCP       2
+# request_access                   32
+```
+
+Those hits were read as *confirming* the snapshot's ant-only story. They do not. **A live string
+proves the code exists, not that it is the path taken** — a shipped feature and the remains of
+its rollout gate coexist happily in one binary. This is the counterpart to the
+`switch-models-on-flag` failure recorded above: there the binary was never checked, here it was
+checked and misread.
+
+📖 `CHANGELOG.md` had the tell, and a too-narrow grep hid it — a single line, *"Fixed
+`switch_display` in the computer-use tool returning 'not available in this session' on
+multi-monitor setups"*. A **bugfix for a user-facing tool is evidence the tool ships.** When
+`src/` says a feature is gated off, grep the changelog wide before repeating it.
+
+### `permissions.defaultMode: "bypassPermissions"` replaces the CLI flag 📦
+
+📦 `src/utils/permissions/permissionSetup.ts:722` builds `orderedModes` in this precedence:
+
+```
+--dangerously-skip-permissions  →  --permission-mode  →  settings permissions.defaultMode
+```
+
+`bypassPermissions` is pushed straight from settings, so the flag is **not** a prerequisite for
+the settings path — despite the SDK-side error text in `cli/print.ts:4595` ("…because the
+session was not launched with `--dangerously-skip-permissions`"), which guards only *runtime*
+`setMode` requests. `bypassPermissions` is a member of `EXTERNAL_PERMISSION_MODES`
+(`src/types/permissions.ts:16`), so it is valid in `settings.json`.
+
+Two things suppress it:
+
+- `permissions.disableBypassPermissionsMode: "disable"`, or the Statsig gate
+  `tengu_disable_bypass_permissions_mode` — the gate outranks settings, and each produces a
+  different notification string.
+- `CLAUDE_CODE_REMOTE` — only `acceptEdits`, `plan`, and `default` survive there. The comment
+  explains why: `bypassPermissions` "would otherwise silently grant full access in a remote
+  environment". It logs `tengu_ccr_unsupported_default_mode_ignored` and falls through.
+
+The companion key `skipDangerousModePermissionPrompt: true` suppresses the one-time acceptance
+screen. 📦 `settings.ts:882` reads it from **user, local, flag, and policy** settings only —
+project settings are deliberately excluded, the same anti-RCE reasoning as `hasAutoModeOptIn()`
+directly below it.
+
+🧪 Practical note on macOS: if `~/.claude/settings.json` is a dotfiles symlink, BSD `sed -i`
+refuses it outright — *"in-place editing only works for regular files"*. Resolve with
+`readlink -f` and edit the real file.
+
+### Shell snapshots: how your rc file reaches the Bash tool 📦🧪
+
+Recorded **2026-08-26** on the work MacBook, same version (2.1.246).
+
+The Bash tool does **not** run `.zshrc` per command. Once per session Claude Code builds a
+*shell snapshot* and every Bash call sources it.
+
+📦 `src/utils/bash/ShellSnapshot.ts:456` — the snapshot shell is spawned as a login shell with
+three variables forced in:
+
+```js
+execFile(binShell, ['-c', '-l', snapshotScript], {
+  env: {
+    ...(process.env.CLAUDE_CODE_DONT_INHERIT_ENV ? {} : subprocessEnv()),
+    SHELL: binShell,
+    GIT_EDITOR: 'true',
+    CLAUDECODE: '1',
+  },
+  timeout: SNAPSHOT_CREATION_TIMEOUT,
+  maxBuffer: 1024 * 1024,
+})
+```
+
+**`CLAUDECODE=1` is set while the user's rc file is being read.** That makes it the supported
+hook for "define this alias only in my real terminal" — e.g. keeping `alias rm='rm -i'` out of
+Claude's non-TTY shell, where the `-i` prompt has nobody to answer it.
+
+📦 `getConfigFile()` chooses the rc file by shell name only: `.zshrc` if the path contains `zsh`,
+`.bashrc` if it contains `bash`, otherwise `.profile`. 📦 `getUserSnapshotContent()` then emits
+three sections:
+
+| Section | zsh | bash |
+|---|---|---|
+| `# Functions` | `typeset +f`, filtered by `grep -vE '^_[^_]'`, each dumped with `typeset -f` | `declare -F`, same filter, base64-encoded per function |
+| `# Shell Options` | `setopt \| sed 's/^/setopt /'` | `shopt -p`, `set -o`, plus `shopt -s expand_aliases` |
+| `# Aliases` | `alias \| sed 's/^alias //g' \| sed 's/^/alias -- /' \| head -n 1000` | same (with a `winpty` filter on msys/cygwin) |
+
+⚠️ Note the **`head -n 1000` cap** on aliases, and the same cap on shell options. A very large rc
+file can silently lose the tail.
+
+🧪 On this machine the snapshot is `~/.claude/shell-snapshots/snapshot-zsh-<ms>-<id>.sh`, 4075
+lines. Two traps when reading one:
+
+- It **opens with `unalias -a 2>/dev/null || true`**, then re-adds everything. The snapshot is
+  authoritative — nothing survives from outside it.
+- Aliases are written as `alias -- rm='rm -i'`. Grepping a snapshot for `alias rm` returns
+  nothing and looks like evidence the alias came from elsewhere.
+
+🧪 The snapshot is built at session start, so an rc-file change does not affect the session that
+is already running. Restart `claude`.
+
+🧪 Reproducing the capture exactly, to test an rc-file guard without restarting:
+
+```sh
+CLAUDECODE=1 SHELL=/bin/zsh GIT_EDITOR=true /bin/zsh -c -l \
+  'source ~/.zshrc >/dev/null 2>&1; alias | grep "^rm="'
+```
+
+⚠️ Test the **unset** branch too. A guard written `[ -z "$CLAUDECODE" ]` is fatal under `nounset`
+(`CLAUDECODE: parameter not set`), which aborts the sourced file and silently discards every
+alias defined below it. Use `${CLAUDECODE:-}`.
