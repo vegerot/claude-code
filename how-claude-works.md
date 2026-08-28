@@ -1529,3 +1529,89 @@ CLAUDECODE=1 SHELL=/bin/zsh GIT_EDITOR=true /bin/zsh -c -l \
 ⚠️ Test the **unset** branch too. A guard written `[ -z "$CLAUDECODE" ]` is fatal under `nounset`
 (`CLAUDECODE: parameter not set`), which aborts the sourced file and silently discards every
 alias defined below it. Use `${CLAUDECODE:-}`.
+
+## 2.1.250
+
+Recorded **2026-08-28** on the veLinux devbox, against
+`~/.local/share/claude/versions/2.1.250` (224 MB). The active symlink had already moved to
+2.1.251 by the time this was written up; the offsets below are for 2.1.250.
+
+### The machine name at claude.ai/code is `os.hostname()`, full stop 🔬
+
+The question: the environment list shows the box as `n251-236-182`. Can it say `devbox`?
+
+🔬 `machineName` appears at 5 byte offsets and `machine_name` at 3. They are one path, with
+nothing between the read and the wire:
+
+```js
+// 194865608 — the bridge chunk's import
+import { hostname as or } from "os";
+
+// 194935815 (`claude remote-control`) and 194947187 (the in-session bridge)
+let lt = or();
+let C = { dir: P, machineName: lt, machineId: Gt, branch: pt, gitRepoUrl: dt, ... };
+
+// 194866944 — registration
+rt.post(`${e.baseUrl}/v1/environments/bridge`, {
+  machine_name: o.machineName,
+  ...(o.machineId != null && { machine_id: o.machineId }),
+  directory: o.dir, branch: o.branch, git_repo_url: xY(o.gitRepoUrl), ...
+})
+```
+
+⇒ **No setting, no config key, no flag.** 🔬 `grep -E 'CLAUDE_[A-Z_]*MACHINE[A-Z_]*'` over the
+whole binary returns nothing, so no env var overrides it either.
+
+⚠️ `machine_id` is not the display name. It comes from `getOrCreateRemoteControlMachineId`
+(`chunk-yvtrda2c.js`), awaited and persisted, and is independent of the hostname.
+
+🎣 Two flags look like the answer and are not: `--name` sets the **session** title, and
+`--remote-control-session-name-prefix` (env `CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX`) sets
+the **session** name prefix. The prefix merely *defaults* to the hostname, which is what makes
+it look right. Both are already in the 2.1.237 flag table above.
+
+⇒ To rename the machine you must change what `gethostname(2)` returns:
+`sudo hostnamectl set-hostname devbox` system-wide, or give the bridge its own UTS namespace.
+
+### Faking the hostname for one process 🧪
+
+🧪 The single-`unshare` form does **not** work:
+
+```
+$ unshare --user --uts --map-current-user bash -c 'hostname devbox'
+CapPrm: 0000000000000000
+CapEff: 0000000000000000
+hostname: you must be root to change the host name
+```
+
+⇒ Mapping to your own UID keeps **no capabilities**, so `CAP_SYS_ADMIN` is unavailable and the
+UTS namespace is useless. 🧪 `--map-auto` also fails on this box:
+`unshare: failed to execute newuidmap: No such file or directory`.
+
+🧪 Nesting works. Set the hostname as fake root, then map back to the real UID:
+
+```bash
+unshare --user --uts --map-root-user bash -c "
+  hostname devbox
+  exec unshare --user --map-user=$(id -u) --map-group=$(id -g) \
+    claude remote-control
+"
+# → hostname=devbox uid=1001 owner=max.coplan
+```
+
+The UTS namespace survives the inner `unshare`; the fake root does not. Without the inner one
+the process runs as UID 0 and `stat -c %U ~/.claude/settings.json` reports `root`.
+
+### Reading a 224 MB binary without timing out ⚙️
+
+🧪 `grep -a -o -E '.{600}machineName.{600}'` on this binary exceeds the 120 s Bash-tool timeout.
+The working method is two steps:
+
+```sh
+timeout 110 grep --byte-offset --only-matching --text 'machineName' 2.1.250
+dd if=2.1.250 bs=1 skip=$((OFFSET-500)) count=1000 2>/dev/null
+```
+
+⇒ `grep -abo` for the bare literal is fast; the context window comes from `dd`. Bounding the
+offsets with `awk -F: '$1>194000000 && $1<195400000'` keeps the hits to one chunk — the bundle
+is concatenated modules, so nearby offsets are the same module.
