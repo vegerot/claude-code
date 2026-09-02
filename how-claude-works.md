@@ -216,6 +216,36 @@ own option and dies with `bad option: --sdk-url` — anthropics/claude-code#2833
 ⇒ **Consequence worth remembering:** server-mode sessions are `--print` sessions, so
 📖 they do **not** appear in the `claude --resume` picker. You must pass the session ID.
 
+#### Two kinds of bridge session — and why a restarted server cannot see the other kind
+
+Found 2026-09-02 on the dev box, Claude Code 2.1.258. A session that was "online" at
+claude.ai/code went to **Remote Control disconnected** and a freshly started
+`claude remote-control` in the same directory did not bring it back.
+
+There are two producers of bridge sessions, and each registers its **own environment**:
+
+| Kind | Process | Transcript `entrypoint` | Pointer `source` | Environment |
+|---|---|---|---|---|
+| REPL bridge | interactive `claude` + `/remote-control`, `--rc`, or `remoteControlAtStartup` | `cli` | `repl` | one per REPL process (`src/bridge/replBridge.ts` registers with a fresh `randomUUID()`) |
+| Standalone server | `claude remote-control` | children are `sdk-cli` | `standalone` | one per server, printed in the banner URL as `?environment=env_…` |
+
+- A restarted standalone server only re-adopts sessions in **its** environment. A REPL
+  bridge session lives in the REPL's environment, so the server never sees it. The docs
+  say the same in one line: "To bring back a session you started with
+  `claude --remote-control` or `/remote-control`, resume the conversation with
+  `claude --continue` or `claude --resume`."
+- `replBridge.ts:312` also refuses a `standalone` pointer for perpetual REPL resume, and
+  `--continue` in `bridgeMain.ts` chains into the `--session-id` flow, which is
+  single-session and rejects `--spawn`. So a wrapper that always passes `--spawn=…`
+  (like `cl`) can never be the thing that resumes.
+- 🔬 The transcript records the link as `{"type":"bridge-session","bridgeSessionId":"cse_…"}`
+  lines. `claude --resume <uuid>` reads those and reconnects (docs: "reconnection record").
+- 🔬 `~/.claude.json` holds `replBridgePlaceholders.<cse_id> = {pid, procStart, createdAt}`
+  while a REPL bridge is alive; it is removed on clean exit.
+- ⚠️ `remoteControlAtStartup: true` in `~/.claude/settings.json` means a bare `claude` in a
+  terminal silently becomes a REPL bridge. Its claude.ai row looks identical to a
+  server-spawned one; the `entrypoint` field in the JSONL is the reliable tell.
+
 #### Session ID retagging
 
 📦 `src/bridge/sessionIdCompat.ts` — the same UUID wears two tags:
