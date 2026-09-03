@@ -1645,3 +1645,305 @@ dd if=2.1.250 bs=1 skip=$((OFFSET-500)) count=1000 2>/dev/null
 ⇒ `grep -abo` for the bare literal is fast; the context window comes from `dd`. Bounding the
 offsets with `awk -F: '$1>194000000 && $1<195400000'` keeps the hits to one chunk — the bundle
 is concatenated modules, so nearby offsets are the same module.
+
+---
+
+## 2.1.251
+
+Recorded **2026-08-28** on the ByteDance work MacBook.
+
+```
+Running: native (2.1.251)
+Commit:  37534ac596d8
+Platform: darwin-arm64
+Path:    ~/.local/share/claude/versions/2.1.251
+```
+
+The question that produced this section: *which flags and env vars make Claude Code more
+powerful?* Everything below is un-minified; original single-letter names are kept in
+`// was:` comments.
+
+### Settings load order
+
+🔬 The source list is a literal array in the binary:
+
+```js
+["userSettings", "projectSettings", "localSettings", "flagSettings", "policySettings"]
+```
+
+`--settings <file-or-json>` is `flagSettings`. It sits **after** the three on-disk scopes, so
+it merges over `~/.claude/settings.json` and overrides only the keys it names.
+`policySettings` still outranks it. A `--settings` JSON string is therefore additive, not a
+replacement — worth knowing before telling someone to re-pass their whole config.
+
+### `ultracode` is a settings key, not an `--effort` value
+
+🔬 `--effort` is registered with `(low, medium, high, xhigh, max)`. `ultracode` is not among
+them. Its own strings say where it lives:
+
+```
+Whether ultracode (xhigh effort plus standing dynamic-workflow orchestration) is active for
+the session. Set per session via the `ultracode` settings key (--settings or
+apply_flag_settings).
+
+- ultracode: xhigh + dynamic workflow orchestration (this session only)
+
+apply_flag_settings: ultracode is not available for this session (dynamic workflows are off,
+or the model / your organization does not allow xhigh effort)
+```
+
+So the spelling is `--settings '{"ultracode":true}'`, and it is scoped to one session by
+design. 🔬 A sibling string shows Remote Control may change only two effort-related keys:
+`cannot be changed over Remote Control (only effortLevel and ultracode can)`.
+
+### `--betas` has a one-entry allowlist
+
+🔬 Un-minified from the binary:
+
+```js
+// The beta descriptor factory: every beta is {name, header}.       // was: he
+function beta(name, header) { return Object.freeze({ name, header }) }
+
+const LONG_CONTEXT = beta("long_context", "context-1m-2025-08-07")   // was: qk
+
+// The ENTIRE allowlist for user-supplied betas — one member.       // was: Ww
+const USER_SETTABLE_BETAS = new Set([LONG_CONTEXT])
+
+// Validates --betas / ANTHROPIC_BETAS.                             // was: ntr
+function validateUserBetas(requested) {                             // was: e
+  if (!requested || requested.length === 0) return
+  if (isNotApiKeyUser()) {                                          // was: Tt()
+    console.warn("Warning: Custom betas are only available for API key users. Ignoring provided betas.")
+    return
+  }
+  const { allowed, disallowed } = partition(requested)              // was: aQ
+  for (const beta of disallowed)
+    console.warn(`Warning: Beta header '${beta}' is not allowed. `
+               + `Only the following betas are supported: ${[...USER_SETTABLE_BETAS].join(", ")}`)
+  return allowed.length > 0 ? allowed : undefined
+}
+```
+
+Two gates, either of which is fatal for a subscription user: API-key-only, and an allowlist
+holding just `context-1m-2025-08-07`. 🔬 The binary contains ~30 other beta header strings
+(`effort-2025-11-24`, `advanced-tool-use-2025-11-20`, `structured-outputs-2025-12-15`,
+`agent-memory-2026-07-22`, `interleaved-thinking-2025-05-14`, `context-management-2025-06-27`,
+`per-turn-control-2026-07-01`, …) but Claude Code selects those per model itself. They cannot
+be forced from the command line.
+
+`ANTHROPIC_BETAS` is the env-var form and is appended through the same path.
+
+### IDE auto-connect: `--ide` is usually redundant
+
+🔬 Un-minified:
+
+```js
+// Decides whether to attach to an IDE at startup.                  // was: Iue
+function shouldAutoConnectIde(ideFlag = false) {                    // was: e
+  // An explicit false env var is an absolute veto.
+  if (env.CLAUDE_CODE_AUTO_CONNECT_IDE === false) return false
+  return Boolean(
+    config().autoConnectIde                 // the /config toggle    // was: oe()
+    || ideFlag                              // the --ide flag
+    || isSupportedIdeTerminal()             // running INSIDE VS Code/JetBrains  // was: uH()
+    || env.CLAUDE_CODE_SSE_PORT !== undefined
+    || env.CLAUDE_CODE_AUTO_CONNECT_IDE === true
+  )
+}
+```
+
+The `isSupportedIdeTerminal()` branch means a session launched from an IDE's integrated
+terminal connects with no flag at all. `--ide` only matters from an outside terminal (iTerm,
+Ghostty, tmux). 📖 CHANGELOG 5588 added `CLAUDE_CODE_AUTO_CONNECT_IDE=false` as the opt-out,
+which confirms auto-connect is the default in that case.
+
+### Bash auto-backgrounding, and the variable that actually caps it
+
+📖 A long-standing entry: *"Auto-background long-running bash commands instead of killing
+them. Customize with `BASH_DEFAULT_TIMEOUT_MS`"*. 🔬 The constants:
+
+```js
+const DEFAULT_BASH_TIMEOUT_MS = 120_000   // 2 min    // was: Uqt
+const MAX_BASH_TIMEOUT_MS     = 600_000   // 10 min   // was: Bqt
+const MIN_AUTO_BACKGROUND_MS  = 2_000                 // was: Hqt
+
+function defaultBashTimeout(env = process.env) {       // was: aye
+  const raw = env.BASH_DEFAULT_TIMEOUT_MS
+  if (raw) { const n = parseInt(raw); if (!isNaN(n) && n > 0) return n }
+  return DEFAULT_BASH_TIMEOUT_MS
+}
+
+function maxBashTimeout(env = process.env) {
+  const raw = env.BASH_MAX_TIMEOUT_MS
+  if (raw) { const n = parseInt(raw); if (!isNaN(n) && n > 0) return Math.max(n, defaultBashTimeout(env)) }
+  return Math.max(MAX_BASH_TIMEOUT_MS, defaultBashTimeout(env))
+}
+```
+
+⚠️ `BASH_DEFAULT_TIMEOUT_MS` sets only the **default**; the model may still request up to
+`maxBashTimeout()` per call. The variable that imposes a ceiling is not in `--help`:
+
+```js
+// Clamps a per-call timeout so a stalled command backgrounds sooner.   // was: WMt
+function effectiveBashTimeout({ requestedTimeoutMs, isMainAgent, canAutoBackground, env = process.env }) {
+  // Subagents and non-backgroundable calls are exempt.
+  if (!isMainAgent || !canAutoBackground) return requestedTimeoutMs
+  const raw = env.CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS
+  if (!raw) return requestedTimeoutMs
+  const configured = parseInt(raw)
+  if (isNaN(configured) || configured <= 0) return requestedTimeoutMs
+  // Never below the 2s floor, never above what the caller asked for.
+  return Math.min(requestedTimeoutMs, Math.max(configured, MIN_AUTO_BACKGROUND_MS))
+}
+```
+
+So `CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS=45000` forces every foreground Bash call in the
+main agent to background after 45 s, overriding a larger `timeout` the model passed. This is
+the knob for "let Claude keep thinking while a stalled command runs" — `BASH_DEFAULT_TIMEOUT_MS`
+is not, because it is overridable per call.
+
+🔬 Related names, all present in the binary:
+
+| Env var | Effect |
+|---|---|
+| `CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS` | Hard ceiling on main-agent Bash timeout; floor 2000 ms |
+| `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` | 📖 Same for MCP tool calls; default 2 min |
+| `CLAUDE_AUTO_BACKGROUND_TASKS` | Gates the worker check-in path below |
+| `CLAUDE_CODE_AUTO_BACKGROUND_WORKER_CHECKIN_SECONDS` | Check-in cadence; read only when the above is set |
+| `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` | 📖 Disables auto-backgrounding and Ctrl+B entirely |
+
+🔬 The check-in resolver, showing the dependency:
+
+```js
+function workerCheckinMs() {                          // was: oWt
+  let seconds
+  if (isCoordinator()) seconds = env.CLAUDE_CODE_COORDINATOR_WORKER_CHECKIN_SECONDS  // was: Fs()
+  else if (env.CLAUDE_AUTO_BACKGROUND_TASKS) seconds = env.CLAUDE_CODE_AUTO_BACKGROUND_WORKER_CHECKIN_SECONDS
+  return seconds === undefined ? undefined : seconds * 1000
+}
+```
+
+### Claude in Chrome: the env var outranks the settings key
+
+This extends the 2.1.246 section above, which established the gate order on Linux. 🔬 The
+same function in 2.1.251, un-minified:
+
+```js
+// was: pUe — called with the parsed --chrome/--no-chrome value.
+function chromeEnabled(chromeFlag) {                  // was: e
+  // Hard block: the OAuth token must carry an accepted scope.
+  if (!hasAcceptedOAuthScope()) {                     // was: _4t()
+    log("[Claude in Chrome] Disabled: OAuth token has no scope accepted by "
+      + "/api/oauth/validate (needs user:profile, user:office, or user:ccr_inference; "
+      + "env-var and setup-token sessions default to user:inference only)")
+    return false
+  }
+  if (chromeFlag === true)  return true               // --chrome
+  if (chromeFlag === false) return false              // --no-chrome
+  if (env.CLAUDE_CODE_ENABLE_CFC === true)  return true
+  if (env.CLAUDE_CODE_ENABLE_CFC === false) return false
+  if (isOtherwiseBlocked()) return false              // was: Le()
+  const cfg = readConfig()                            // was: oe()
+  if (cfg.claudeInChromeDefaultEnabled !== undefined) return cfg.claudeInChromeDefaultEnabled
+  return false                                        // DEFAULT: OFF
+}
+```
+
+⚠️ The important part is **downstream** of that function. Two later wiring gates read the env
+var but not the settings key:
+
+```js
+// was: yr — enterprise policy block
+const blockedByEnterprise =
+  chromeConfigured && flags.chrome !== true
+  && env.CLAUDE_CODE_ENABLE_CFC !== true
+  && mcpServerDenied
+// → "[Claude in Chrome] Skipping chrome wiring: blocked by enterprise MCP config
+//    or managed deniedMcpServers policy"
+
+// was: ds — safe/restricted mode block
+const blockedBySafeMode =
+  chromeConfigured && flags.chrome !== true
+  && (env.CLAUDE_CODE_ENABLE_CFC !== true && isSafeMode() || isRestricted())
+// → "[Claude in Chrome] Skipping chrome wiring: --safe-mode or --restricted"
+```
+
+So `CLAUDE_CODE_ENABLE_CFC=1` and `--chrome` can punch through an enterprise
+`deniedMcpServers` policy and `--safe-mode`; `claudeInChromeDefaultEnabled: true` cannot.
+The two are **not** interchangeable, even though `chromeEnabled()` alone makes them look it.
+`--restricted` is absolute — no env var clears it.
+
+🔬 `claudeInChromeDefaultEnabled` is a real config key (it appears in the config key list
+beside `inputNeededNotifEnabled` and `agentPushNotifEnabled`) and is surfaced in `/config` as
+`"Claude in Chrome enabled by default"`.
+
+### Background-session subcommands
+
+🧪 `--help` for each, quoted exactly — these are newly listed in `claude --help` as of 2.1.251:
+
+```
+claude attach <id>   Open the background session in this terminal. ← returns to agent view,
+                     Ctrl+Z drops back to your shell. The session keeps running either way.
+claude logs <id>     Print the background session's recent terminal output.
+claude respawn <id>|--all
+                     Restart a background session (or all of them) so it picks up the
+                     current Claude binary.
+claude stop <id>     Stop a background session. Its conversation is kept; resume it later
+                     with `claude attach <id>`.
+claude rm <id>       Delete a background session and its worktree. Unlike `stop`, works on
+                     already-exited sessions.
+```
+
+🔬 `claude agents` accepts `--add-dir`, `--agent`, `--effort`, `--mcp-config`, `--model`,
+`--permission-mode`, `--plugin-dir`, `--restricted`, `--setting-sources`, `--settings`,
+`--strict-mcp-config`, and `--dangerously-skip-permissions` as **defaults for every session it
+dispatches**, plus `--json` to print the list without a TTY.
+
+### Subagent-related env vars
+
+🔬 Present in the binary, all confirmed by name:
+
+| Env var | Effect |
+|---|---|
+| `CLAUDE_CODE_FORK_SUBAGENT` | 📖 Forked subagents on external builds; works in `-p`/SDK since 2.1.x |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | 📖 Nesting depth; default 3, set 1 to disable nesting |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | 📖 As of 2.1.251 this is a *default*, not an override — an agent definition's `model:` and an explicit per-spawn model now win |
+| `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` | Session-wide subagent cap |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | 📖 One implicit team per session; spawn teammates via the Agent tool's `name` |
+
+### Effort is stored per model
+
+🔬 `modelSettings` holds a per-model `effortLevel` that overrides the top-level one:
+
+```json
+"effortLevel": "high",
+"modelSettings": {
+  "claude-fable-5": { "effortLevel": "xhigh" },
+  "claude-opus-5":  { "effortLevel": "xhigh" }
+}
+```
+
+📖 2.1.251: *"Changed `/effort` to save your default effort level per model, so each model
+keeps its own setting when you switch."* A top-level `effortLevel` alone therefore silently
+applies to every model **except** those named in `modelSettings`.
+
+🔬 Also in 2.1.251: *"Fixed Opus 5 requests failing with 'effort … is not supported when
+thinking is disabled' when effort was xhigh/max and thinking was turned off; effort is now
+sent as `high` in that case."* So `MAX_THINKING_TOKENS=0` quietly downgrades a `max` effort
+setting.
+
+### Method note
+
+`strings` on the 197 MB binary is slow to re-run per query. Dump it once, then use `rg` with
+`--only-matching` and fixed-width context windows to read around a symbol:
+
+```sh
+BIN=~/.local/share/claude/versions/2.1.251
+strings -a "$BIN" > /tmp/claude-strings.txt
+
+# read 260 chars before and 400 after a name, to catch the enclosing function
+rg --only-matching '.{260}CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS.{400}' /tmp/claude-strings.txt
+
+# the env-var registry is one giant object literal; this enumerates it
+rg --only-matching 'CLAUDE_CODE_[A-Z0-9_]+:\(\)=>' /tmp/claude-strings.txt | sort --unique
+```
