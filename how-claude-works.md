@@ -1947,3 +1947,67 @@ rg --only-matching '.{260}CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS.{400}' /tmp/cla
 # the env-var registry is one giant object literal; this enumerates it
 rg --only-matching 'CLAUDE_CODE_[A-Z0-9_]+:\(\)=>' /tmp/claude-strings.txt | sort --unique
 ```
+
+---
+
+## 2.1.252
+
+Recorded **2026-08-31** on the ByteDance work MacBook, running 2.1.252. The question that
+produced this section: *how can the "Context is 97% full" suggestions say one tool is using
+2.7m tokens — 272% of context?*
+
+### Context suggestions can claim >100% because they count base64 as text 🧪📦🔬
+
+🧪 Observed in a claude-in-chrome-heavy session whose real live context was 966k of 1M
+(97% — that number comes from the API's own `usage` block and is exact). The suggestions
+panel under the warning showed:
+
+```
+mcp__claude-in-chrome__browser_batch using 2.7m tokens (272%) → save ~543k
+mcp__claude-in-chrome__computer using 623.1k tokens (62%) → save ~124.6k
+```
+
+2.7m ÷ 1M = 272%: the denominator is the raw context window, and the numerator is an
+estimate that can exceed it by multiples.
+
+📦 The pipeline, from `src/` (mechanism only; the 🔬 strings below confirm the feature is in
+the shipped binary):
+
+- `src/utils/contextSuggestions.ts` — the generic per-tool case fires at ≥20%:
+  `` `${toolName} using ${tokenStr} tokens (${percent.toFixed(0)}%)` `` with
+  `percent = (tokens / data.rawMaxTokens) * 100` and `savingsTokens = tokens * 0.2`
+  (Grep and WebFetch get dedicated cases with 0.3 / 0.4 savings factors).
+- The per-tool `tokens` comes from `approximateMessageTokens()` in
+  `src/utils/analyzeContext.ts`. It walks the **microcompacted live messages** — so this is
+  the live conversation, not a whole-transcript sum — and for every content block does:
+
+  ```ts
+  const blockStr = jsonStringify(block)
+  const blockTokens = roughTokenCountEstimation(blockStr) // = blockStr.length / 4
+  ```
+
+  `tool_result` blocks are attributed to a tool through a `tool_use_id → name` map.
+- The failure: a `tool_result` holding a base64 screenshot gets the base64 counted at 4
+  bytes/token. A ~1 MB PNG → ~1.37 MB base64 → **~340k estimated tokens** for an image the
+  API bills at ~1.5k (vision patch formula; capped at 4,784 even on the high-res tier).
+  That is a ~200× overcount per screenshot, so a handful of live screenshots inside
+  `browser_batch` results adds up to "2.7m tokens".
+- The kicker: the correct estimator already exists in the same codebase.
+  `roughTokenCountEstimationForBlock()` in `src/services/tokenEstimation.ts` special-cases
+  `image` and `document` blocks at a **flat 2000 tokens**, and its comment describes this
+  exact failure: *"base64 PDF in source.data. Must NOT reach the jsonStringify catch-all — a
+  1MB PDF is ~1.33M base64 chars → ~325k estimated tokens, vs the ~2000 the API actually
+  charges."* The suggestions breakdown does not use it.
+
+🔬 `strings` on `~/.local/share/claude/versions/2.1.252` finds
+`This tool is consuming a significant portion of context.`,
+`Autocompact will trigger soon, which discards older messages. Use /compact now to control what gets kept.`,
+and the identifier `rawMaxTokens`. The feature and its window-relative denominator are in the
+shipped binary; the estimation path itself was not decompiled, so the 4-bytes/token mechanism
+stays a 📦 claim — the observed 272% is its fingerprint.
+
+📖 Nothing in `CHANGELOG.md` through 2.1.252 mentions fixing suggestion token estimates.
+
+⇒ Practical reading: **trust the top-line context percentage; distrust the per-tool
+suggestion numbers whenever a tool returns images**, and discount their "save ~N" the same
+way. Reported via `/feedback`, receipt `4980a14a-06df-4796-aa24-88249cb0e032`.
