@@ -2216,3 +2216,72 @@ and ignored. ⇒ The only safe way to comment a `settings.json` is a sibling key
 | The same on every OS | also set `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` (and accept `pwsh` must exist) |
 | Claude to *choose* PowerShell | a `CLAUDE.md` instruction; no setting does this |
 | A comment in `settings.json` | a sibling `"// key"`, never `//` |
+
+### Binary-only: the streaming retry rule — why "Connection lost mid-response" is not retried 🔬🧪
+
+Source of the question: a week of `API Error: Connection lost mid-response` in one session,
+with `/debug` on for the last day (write-up in
+`~/ai-conversations/claude-learning/stream-reset-after-first-block.md`).
+
+The `/v1/messages` stream consumer keeps three flags and decides on a stream error
+(`ECONNRESET`, `EPIPE`, watchdog idle timeout, mid-stream 5xx) with this rule. Un-minified from
+the 2.1.259 strings; identifiers are descriptive names I chose, originals in `// was:` comments.
+
+```ts
+let yieldedBlocks = []     // was: ma — completed content blocks already handed to the query loop
+let sawAnyBlock  = false   // was: af — some non-fallback block has completed
+let sawOutput    = false   // was: Gf — a block that is not thinking/redacted_thinking has STARTED
+                           //         (set in the content_block_start handler, and again on completion)
+let stopReason   = null    // was: kf — filled in by message_delta
+let networkRetries = 0     // was: lk — capped at 10 (the "(n/10)" in the log line)
+let watchdogRetries = 0    // was: pc
+
+// on a stream error:
+if (yieldedBlocks.length === 0 && !sawAnyBlock) {
+  // nothing has reached the user — plain replay
+  log('Stream connection error (CODE) — retrying streaming (n/10)')          // 🧪 seen in the log
+} else if (!sawOutput && stopReason === null && networkRetries < 10) {
+  // only thinking has been seen — safe to replay
+  log('Stream connection closed (CODE) after thinking-only yield — retrying streaming (n/10)')
+  // emits content_block_stop for the open block and message_stop, then `continue`s the request loop
+} else {
+  // a text or tool_use block has started — replaying could re-run a tool
+  stopReason = yieldedBlocks.some(hasToolUse) ? 'tool_use' : 'end_turn'   // stamped on the partials
+  log('Stream connection closed (CODE) after N block(s) yielded — finalizing partial response')
+  // telemetry: tengu_streaming_partial_finalized {blocks_yielded, has_output, cause, ...}
+  error = sawOutput
+    ? 'Connection lost mid-response. The response above may be incomplete.'
+    : '… before a response was produced. Try again.'
+}
+```
+
+Details worth having verbatim:
+
+- The `cause` enum is `watchdog` | `server_error` | `stream_suspended` | `network_down` |
+  `stale_connection`, and the user-facing text varies with it: `The response stopped arriving`
+  (watchdog), `Server error mid-response` (5xx), `Your computer went to sleep mid-response`
+  (`StreamSuspended`), else `Connection lost mid-response`.
+- The guard just above this rule is the 2.1.222 fix: if `message_delta` already carried a
+  `stop_reason`, it logs `Stream … after message_delta (stop_reason=…) — response already
+  complete, no truncation` and sends `tengu_streaming_close_after_complete` instead of an error.
+- **The block that was in flight is discarded.** Only completed blocks are in `yieldedBlocks`, so
+  the transcript's partial assistant message holds a *signed* `thinking` block or a completed
+  short `text`, never the half-streamed one.
+- Consequence: a reset during thinking is invisible; the same reset two seconds later ends the
+  turn. In the observed log 10 resets were retried and 4 finalized.
+
+Two other debug-log subsystems seen in the same dig, useful as `rg` anchors:
+
+- `SSETransport:` — Remote Control's server-sent-events worker stream,
+  `Opening https://api.anthropic.com/v1/code/sessions/<cse_…>/worker/events/stream?from_sequence_num=N`.
+  Closes log `Stream read error: The socket connection was closed unexpectedly` and reconnect in
+  ~1 s (`Reconnecting in 971ms (attempt 1, 0s elapsed)`); `Liveness timeout, reconnecting` is the
+  client-side watchdog. The server caps the stream at exactly 3600 s. 🧪
+- `CCRClient:` — the same Remote Control's heartbeat/events POST client (`Heartbeat sent`,
+  `client events failed: …`, `PUT worker failed`, `initialized, epoch=N`). 🧪
+- `1P event logging: N events failed to export (code=…)` — telemetry uploads; the codes seen
+  were `ECONNRESET`, `ERR_SOCKET_CLOSED`, `ECONNABORTED, timeout of 10000ms exceeded`, and
+  `ECONNREFUSED 2607:6bc0::10:443` (an IPv6 fallback attempt after v4 failed, on a Mac with no
+  global v6 address). 🧪
+- `[event-loop-stall] blocked for … (wall drift Nms, clock jump Nms …) [likely sleep/wake]` —
+  the only record of the laptop sleeping, handy for locating the machine in time. 🧪
