@@ -360,21 +360,21 @@ from usage, and the original is noted per line.
 // `tmuxEnv` (f) is { CLAUDE_CODE_TMUX_SESSION, CLAUDE_CODE_TMUX_PREFIX,
 //                    CLAUDE_CODE_TMUX_PREFIX_CONFLICTS }.
 
-const tmuxVersionMatch = tmuxVersionResult.stdout.match(/(\d+)\.(\d+)/)  // was: m
+const tmuxVersionMatch = tmuxVersionResult.stdout.match(/(\d+)\.(\d+)/)
 const major = Number(tmuxVersionMatch?.[1])
 const minor = Number(tmuxVersionMatch?.[2])
 
 // tmux gained `-e KEY=VALUE` on new-session in 3.2, so gate on >= 3.2.
-const supportsEnvFlag =                                                   // was: h
+const supportsEnvFlag =
   tmuxVersionMatch !== null && (major > 3 || (major === 3 && minor >= 2))
 
 // Modern tmux: hand the vars over as explicit -e arguments.
-const envFlagArgs = supportsEnvFlag                                       // was: g
+const envFlagArgs = supportsEnvFlag
   ? Object.entries(tmuxEnv).flatMap(([key, value]) => ["-e", `${key}=${value}`])
   : []
 
 // Old tmux: fall back to leaking them through the child's environment.
-const childEnv = { ...process.env, ...(supportsEnvFlag ? {} : tmuxEnv) }  // was: y
+const childEnv = { ...process.env, ...(supportsEnvFlag ? {} : tmuxEnv) }
 ```
 
 <details><summary>Original minified form, as it appears in the binary</summary>
@@ -722,21 +722,21 @@ space to show QR code · w to toggle spawn mode
 
 ### `sshConfigs` — the Desktop/CLI SSH environment feature 🔬
 
-🔬 The settings schema is in the binary. Un-minified below; original single-letter names in
-`// was:` comments. `O()` is a string schema, `zt()` boolean, `Qe()` number, `$r([…])` enum —
+🔬 The settings schema is in the binary, un-minified below. `O()` is a string schema, `zt()`
+boolean, `Qe()` number, `$r([…])` enum —
 read off neighbouring settings in the same table. `mt(ye({…}))` is an array-of-object, inferred
 from the plural key name and the "configurations" wording.
 
 ```ts
-sshConfigs: z.array(                                   // was: mt
-  z.object({                                           // was: ye
+sshConfigs: z.array(
+  z.object({
     id: z.string()
       .describe('Unique identifier for this SSH config. Used to match configs across settings sources.'),
     name: z.string()
       .describe('Display name for the SSH connection'),
     sshHost: z.string()
       .describe('SSH host in format "user@hostname" or "hostname", or a host alias from ~/.ssh/config'),
-    sshPort: z.number().int().optional()               // was: Qe
+    sshPort: z.number().int().optional()
       .describe('SSH port (default: 22)'),
     sshIdentityFile: z.string().optional()
       .describe('Path to SSH identity file (private key)'),
@@ -819,11 +819,11 @@ Which transport runs is decided at connect time. 🔬 Un-minified from `app.asar
 (chunk `index2.chunk-zHVVshID.js`):
 
 ```js
-const SSH_TRANSPORT_ENV_VAR = 'CLAUDE_DESKTOP_SSH_TRANSPORT'    // was: t
+const SSH_TRANSPORT_ENV_VAR = 'CLAUDE_DESKTOP_SSH_TRANSPORT'
 
 // The env override is honored ONLY on internal ("Nest") or dev builds.
 function sshTransportOverrideFromEnv() {                        // was: n
-  if (!isInternalBuild() && !isDevBuild()) return undefined     // was: e.nC(), e.eC()
+  if (!isInternalBuild() && !isDevBuild()) return undefined
   const value = process.env[SSH_TRANSPORT_ENV_VAR]
   return value === 'openssh' || value === 'ssh2' ? value : undefined
 }
@@ -930,7 +930,7 @@ it. 📖 anthropics/claude-code#74671 asks for exactly this and is open.
 
 #### The enable predicate 🔬
 
-*Un-minified.* Original single-letter names in `// was:` comments. The helpers `E()`,
+*Un-minified.* The helpers `E()`,
 `d()`, and `_()` are the chunk's own; `E()` is an OAuth-scope check and `d()` reads the
 global config. **`_()` I did not resolve** — it is a negative guard that sits between the
 env var and the config key.
@@ -938,7 +938,7 @@ env var and the config key.
 ```js
 function isClaudeInChromeEnabled(flagValue) {          // was: Je(e)
   // 1. OAuth scope. The message names the accepted scopes, which is the useful part.
-  if (!hasAcceptedOAuthScope()) {                      // was: E()
+  if (!hasAcceptedOAuthScope()) {
     log("[Claude in Chrome] Disabled: OAuth token has no scope accepted by " +
         "/api/oauth/validate (needs user:profile, user:office, or user:ccr_inference; " +
         "env-var and setup-token sessions default to user:inference only)")
@@ -951,9 +951,9 @@ function isClaudeInChromeEnabled(flagValue) {          // was: Je(e)
   if (env.CLAUDE_CODE_ENABLE_CFC === true)  return true
   if (env.CLAUDE_CODE_ENABLE_CFC === false) return false
   // 4. An unresolved guard.
-  if (unresolvedGuard()) return false                  // was: _()
+  if (unresolvedGuard()) return false
   // 5. The /chrome menu's "Enabled by default" toggle, from the global config.
-  const config = getGlobalConfig()                     // was: d()
+  const config = getGlobalConfig()
   if (config.claudeInChromeDefaultEnabled !== undefined)
     return config.claudeInChromeDefaultEnabled
   return false
@@ -985,21 +985,21 @@ the `/chrome` toggle, and `--no-chrome` beats the env var.
 *Un-minified* from the startup path. `parsedOptions` is Commander's option object.
 
 ```js
-const chromeEnabled =                                   // was: Ye
-  isClaudeInChromeEnabled(parsedOptions.chrome) && secondGate()   // was: Iu(Kt.chrome) && mo()
+const chromeEnabled =
+  isClaudeInChromeEnabled(parsedOptions.chrome) && secondGate()
 
-const deniedByPolicy   = isMcpServerDenied(serverName, serverConfig())   // was: qo
-const enterpriseBlocks = hasEnterpriseMcpConfig() || deniedByPolicy      // was: Br
+const deniedByPolicy   = isMcpServerDenied(serverName, serverConfig())
+const enterpriseBlocks = hasEnterpriseMcpConfig() || deniedByPolicy
 
 // Note both skips require the opt-in to have been IMPLICIT: an explicit --chrome or
 // CLAUDE_CODE_ENABLE_CFC=1 does not take these branches.
-const skipForPolicy =                                   // was: $r
+const skipForPolicy =
   chromeEnabled && parsedOptions.chrome !== true &&
   env.CLAUDE_CODE_ENABLE_CFC !== true && enterpriseBlocks
 
-const skipForSafeMode =                                 // was: Am
+const skipForSafeMode =
   chromeEnabled && parsedOptions.chrome !== true &&
-  env.CLAUDE_CODE_ENABLE_CFC !== true && isSafeMode()   // was: oe()
+  env.CLAUDE_CODE_ENABLE_CFC !== true && isSafeMode()
 ```
 
 🔬 The three messages that come out of it, verbatim:
@@ -1059,7 +1059,7 @@ installed native-messaging manifest points at.
 Two unrelated "remote" concepts share the word, and only one of them touches Chrome.
 
 ```js
-isRemoteMode: env.CLAUDE_CODE_REMOTE || isCloudSession()   // was: V.CLAUDE_CODE_REMOTE || Ll()
+isRemoteMode: env.CLAUDE_CODE_REMOTE || isCloudSession()
 ```
 
 *Un-minified*, the predicate that consumes it:
@@ -1660,8 +1660,7 @@ Path:    ~/.local/share/claude/versions/2.1.251
 ```
 
 The question that produced this section: *which flags and env vars make Claude Code more
-powerful?* Everything below is un-minified; original single-letter names are kept in
-`// was:` comments.
+powerful?* Everything below is un-minified.
 
 ### Settings load order
 
@@ -1701,22 +1700,22 @@ design. 🔬 A sibling string shows Remote Control may change only two effort-re
 🔬 Un-minified from the binary:
 
 ```js
-// The beta descriptor factory: every beta is {name, header}.       // was: he
+// The beta descriptor factory: every beta is {name, header}.
 function beta(name, header) { return Object.freeze({ name, header }) }
 
-const LONG_CONTEXT = beta("long_context", "context-1m-2025-08-07")   // was: qk
+const LONG_CONTEXT = beta("long_context", "context-1m-2025-08-07")
 
-// The ENTIRE allowlist for user-supplied betas — one member.       // was: Ww
+// The ENTIRE allowlist for user-supplied betas — one member.
 const USER_SETTABLE_BETAS = new Set([LONG_CONTEXT])
 
-// Validates --betas / ANTHROPIC_BETAS.                             // was: ntr
+// Validates --betas / ANTHROPIC_BETAS.
 function validateUserBetas(requested) {                             // was: e
   if (!requested || requested.length === 0) return
-  if (isNotApiKeyUser()) {                                          // was: Tt()
+  if (isNotApiKeyUser()) {
     console.warn("Warning: Custom betas are only available for API key users. Ignoring provided betas.")
     return
   }
-  const { allowed, disallowed } = partition(requested)              // was: aQ
+  const { allowed, disallowed } = partition(requested)
   for (const beta of disallowed)
     console.warn(`Warning: Beta header '${beta}' is not allowed. `
                + `Only the following betas are supported: ${[...USER_SETTABLE_BETAS].join(", ")}`)
@@ -1738,14 +1737,14 @@ be forced from the command line.
 🔬 Un-minified:
 
 ```js
-// Decides whether to attach to an IDE at startup.                  // was: Iue
+// Decides whether to attach to an IDE at startup.
 function shouldAutoConnectIde(ideFlag = false) {                    // was: e
   // An explicit false env var is an absolute veto.
   if (env.CLAUDE_CODE_AUTO_CONNECT_IDE === false) return false
   return Boolean(
-    config().autoConnectIde                 // the /config toggle    // was: oe()
+    config().autoConnectIde                 // the /config toggle
     || ideFlag                              // the --ide flag
-    || isSupportedIdeTerminal()             // running INSIDE VS Code/JetBrains  // was: uH()
+    || isSupportedIdeTerminal()             // running INSIDE VS Code/JetBrains
     || env.CLAUDE_CODE_SSE_PORT !== undefined
     || env.CLAUDE_CODE_AUTO_CONNECT_IDE === true
   )
@@ -1763,9 +1762,9 @@ which confirms auto-connect is the default in that case.
 them. Customize with `BASH_DEFAULT_TIMEOUT_MS`"*. 🔬 The constants:
 
 ```js
-const DEFAULT_BASH_TIMEOUT_MS = 120_000   // 2 min    // was: Uqt
-const MAX_BASH_TIMEOUT_MS     = 600_000   // 10 min   // was: Bqt
-const MIN_AUTO_BACKGROUND_MS  = 2_000                 // was: Hqt
+const DEFAULT_BASH_TIMEOUT_MS = 120_000   // 2 min
+const MAX_BASH_TIMEOUT_MS     = 600_000   // 10 min
+const MIN_AUTO_BACKGROUND_MS  = 2_000
 
 function defaultBashTimeout(env = process.env) {       // was: aye
   const raw = env.BASH_DEFAULT_TIMEOUT_MS
@@ -1784,7 +1783,7 @@ function maxBashTimeout(env = process.env) {
 `maxBashTimeout()` per call. The variable that imposes a ceiling is not in `--help`:
 
 ```js
-// Clamps a per-call timeout so a stalled command backgrounds sooner.   // was: WMt
+// Clamps a per-call timeout so a stalled command backgrounds sooner.
 function effectiveBashTimeout({ requestedTimeoutMs, isMainAgent, canAutoBackground, env = process.env }) {
   // Subagents and non-backgroundable calls are exempt.
   if (!isMainAgent || !canAutoBackground) return requestedTimeoutMs
@@ -1817,7 +1816,7 @@ is not, because it is overridable per call.
 ```js
 function workerCheckinMs() {                          // was: oWt
   let seconds
-  if (isCoordinator()) seconds = env.CLAUDE_CODE_COORDINATOR_WORKER_CHECKIN_SECONDS  // was: Fs()
+  if (isCoordinator()) seconds = env.CLAUDE_CODE_COORDINATOR_WORKER_CHECKIN_SECONDS
   else if (env.CLAUDE_AUTO_BACKGROUND_TASKS) seconds = env.CLAUDE_CODE_AUTO_BACKGROUND_WORKER_CHECKIN_SECONDS
   return seconds === undefined ? undefined : seconds * 1000
 }
@@ -1829,10 +1828,10 @@ This extends the 2.1.246 section above, which established the gate order on Linu
 same function in 2.1.251, un-minified:
 
 ```js
-// was: pUe — called with the parsed --chrome/--no-chrome value.
+// Called with the parsed --chrome/--no-chrome value.
 function chromeEnabled(chromeFlag) {                  // was: e
   // Hard block: the OAuth token must carry an accepted scope.
-  if (!hasAcceptedOAuthScope()) {                     // was: _4t()
+  if (!hasAcceptedOAuthScope()) {
     log("[Claude in Chrome] Disabled: OAuth token has no scope accepted by "
       + "/api/oauth/validate (needs user:profile, user:office, or user:ccr_inference; "
       + "env-var and setup-token sessions default to user:inference only)")
@@ -1842,8 +1841,8 @@ function chromeEnabled(chromeFlag) {                  // was: e
   if (chromeFlag === false) return false              // --no-chrome
   if (env.CLAUDE_CODE_ENABLE_CFC === true)  return true
   if (env.CLAUDE_CODE_ENABLE_CFC === false) return false
-  if (isOtherwiseBlocked()) return false              // was: Le()
-  const cfg = readConfig()                            // was: oe()
+  if (isOtherwiseBlocked()) return false
+  const cfg = readConfig()
   if (cfg.claudeInChromeDefaultEnabled !== undefined) return cfg.claudeInChromeDefaultEnabled
   return false                                        // DEFAULT: OFF
 }
@@ -1853,7 +1852,7 @@ function chromeEnabled(chromeFlag) {                  // was: e
 var but not the settings key:
 
 ```js
-// was: yr — enterprise policy block
+// enterprise policy block
 const blockedByEnterprise =
   chromeConfigured && flags.chrome !== true
   && env.CLAUDE_CODE_ENABLE_CFC !== true
@@ -1861,7 +1860,7 @@ const blockedByEnterprise =
 // → "[Claude in Chrome] Skipping chrome wiring: blocked by enterprise MCP config
 //    or managed deniedMcpServers policy"
 
-// was: ds — safe/restricted mode block
+// safe/restricted mode block
 const blockedBySafeMode =
   chromeConfigured && flags.chrome !== true
   && (env.CLAUDE_CODE_ENABLE_CFC !== true && isSafeMode() || isRestricted())
@@ -2052,14 +2051,14 @@ export function resolveDefaultShell(): 'bash' | 'powershell' {
 }
 ```
 
-🔬 2.1.259 is not. *Un-minified*; original names in `// was:` comments. `Je()` is the settings
+🔬 2.1.259 is not. *Un-minified.* `Je()` is the settings
 getter, `cs()` and `lH()` are covered below.
 
 ```js
 function resolveDefaultShell() {                      // was: iat
-  const setting = getSettings().defaultShell          // was: Je().defaultShell
-  if (setting === "bash"       && !bashAvailable())  return "powershell"  // was: cs()
-  if (setting === "powershell" && !psToolEnabled())  return "bash"        // was: lH()
+  const setting = getSettings().defaultShell
+  if (setting === "bash"       && !bashAvailable())  return "powershell"
+  if (setting === "powershell" && !psToolEnabled())  return "bash"
   return setting ?? (bashAvailable() ? "bash" : "powershell")
 }
 ```
@@ -2096,11 +2095,11 @@ export function isPowerShellToolEnabled(): boolean {
 
 ```js
 function psToolEnabled() {                            // was: lH
-  const envVar = parsedEnv.CLAUDE_CODE_USE_POWERSHELL_TOOL   // was: a.…
-  if (getPlatform() !== "windows") return envVar === true    // was: D()
+  const envVar = parsedEnv.CLAUDE_CODE_USE_POWERSHELL_TOOL
+  if (getPlatform() !== "windows") return envVar === true
   if (envVar !== undefined) return envVar                    // explicit env var wins
-  if (findGitBash() === null) return true                    // was: q$() — no bash ⇒ PS tool on
-  return featureFlag("tengu_cobalt_ridge", false)            // was: P(…) — gradual rollout
+  if (findGitBash() === null) return true                    // no bash ⇒ PS tool on
+  return featureFlag("tengu_cobalt_ridge", false)            // gradual rollout
 }
 
 function bashAvailable() {                            // was: cs
@@ -2145,7 +2144,7 @@ Three things fall out, none of them in the snapshot:
 The `!` handler, and the child-process shape. Both callers of `resolveDefaultShell` are here:
 
 ```js
-async function handleBangCommand(input, …) {                       // was: F
+async function handleBangCommand(input, …) {
   const usePowerShell = psToolEnabled() && resolveDefaultShell() === "powershell"
   const respond = getSettings().respondToBashCommands ?? true
   logEvent("tengu_input_bash", { powershell: usePowerShell, respond })
