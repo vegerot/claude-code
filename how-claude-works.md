@@ -2011,3 +2011,209 @@ stays a 📦 claim — the observed 272% is its fingerprint.
 ⇒ Practical reading: **trust the top-line context percentage; distrust the per-tool
 suggestion numbers whenever a tool returns images**, and discount their "save ~N" the same
 way. Reported via `/feedback`, receipt `4980a14a-06df-4796-aa24-88249cb0e032`.
+
+---
+
+## 2.1.259
+
+Recorded **2026-09-03** on the Windows gaming PC (`windows-pc`).
+
+```
+Running: native (2.1.259)
+Commit:  9b549c8d1c72
+Platform: win32-x64
+Path:    C:\Users\Max\.local\bin\claude.exe
+```
+
+The question that produced this section: *how do I make the `!` prefix run PowerShell instead
+of Git Bash on Windows, from a `settings.json` checked into dotfiles shared with a Mac and two
+Linux boxes?* Every load-bearing answer turned out to be **binary-only** — this is the clearest
+case yet of the snapshot describing a mechanism that has since grown a second half.
+
+### The setting 📦🔬
+
+`defaultShell` is in both, at `src/utils/settings/types.ts:464`. 🔬 Its `describe()` string is
+verbatim in the binary:
+
+> Default shell for input-box `!` commands. Defaults to `'bash'` on all platforms (no Windows
+> auto-flip).
+
+Enum: `bash | powershell`. It governs the **input box only** — never which shell tool the model
+picks. 📦 Two sibling files say so out loud: `frontmatterParser.ts:55` ("Never consults
+settings.defaultShell: skills are portable across platforms") and `promptShellExecution.ts:65`.
+
+### Binary-only: `resolveDefaultShell` has grown a self-correcting flip 🔬
+
+📦 The snapshot is one line with no fallback:
+
+```ts
+export function resolveDefaultShell(): 'bash' | 'powershell' {
+  return getInitialSettings().defaultShell ?? 'bash'
+}
+```
+
+🔬 2.1.259 is not. *Un-minified*; original names in `// was:` comments. `Je()` is the settings
+getter, `cs()` and `lH()` are covered below.
+
+```js
+function resolveDefaultShell() {                      // was: iat
+  const setting = getSettings().defaultShell          // was: Je().defaultShell
+  if (setting === "bash"       && !bashAvailable())  return "powershell"  // was: cs()
+  if (setting === "powershell" && !psToolEnabled())  return "bash"        // was: lH()
+  return setting ?? (bashAvailable() ? "bash" : "powershell")
+}
+```
+
+<details><summary>Original minified form, as it appears in the binary</summary>
+
+```js
+function iat(){let e=Je().defaultShell;if(e==="bash"&&!cs())return"powershell";if(e==="powershell"&&!lH())return"bash";return e??(cs()?"bash":"powershell")}
+export{iat};
+```
+
+</details>
+
+⇒ **This flip is what makes one checked-in key portable.** Set `"defaultShell": "powershell"` in
+a shared dotfile and macOS/Linux revert to `bash` on their own, because the PowerShell gate below
+is false there. No per-machine settings file, and none exists at user scope anyway — 📦
+`settings.ts:305` resolves `localSettings` to a **project**-relative `.claude/settings.local.json`.
+
+### Binary-only: the PowerShell-tool gate, and a rollout flag named `tengu_cobalt_ridge` 🔬
+
+📦 The snapshot gates on the env var alone, and is unconditionally false off Windows:
+
+```ts
+export function isPowerShellToolEnabled(): boolean {
+  if (getPlatform() !== 'windows') return false
+  return process.env.USER_TYPE === 'ant'
+    ? !isEnvDefinedFalsy(process.env.CLAUDE_CODE_USE_POWERSHELL_TOOL)
+    : isEnvTruthy(process.env.CLAUDE_CODE_USE_POWERSHELL_TOOL)
+}
+```
+
+🔬 2.1.259 has replaced the `USER_TYPE` branch with a rollout flag, and — the part that matters —
+**no longer returns false off Windows**:
+
+```js
+function psToolEnabled() {                            // was: lH
+  const envVar = parsedEnv.CLAUDE_CODE_USE_POWERSHELL_TOOL   // was: a.…
+  if (getPlatform() !== "windows") return envVar === true    // was: D()
+  if (envVar !== undefined) return envVar                    // explicit env var wins
+  if (findGitBash() === null) return true                    // was: q$() — no bash ⇒ PS tool on
+  return featureFlag("tengu_cobalt_ridge", false)            // was: P(…) — gradual rollout
+}
+
+function bashAvailable() {                            // was: cs
+  if (getPlatform() !== "windows") return true
+  return findGitBash() !== null
+}
+
+function defaultHookShell() {                         // was: OM
+  return bashAvailable() ? "bash" : "powershell"
+}
+```
+
+<details><summary>Original minified form, as it appears in the binary</summary>
+
+```js
+function lH(){let e=a.CLAUDE_CODE_USE_POWERSHELL_TOOL;if(D()!=="windows")return e===!0;if(e!==void 0)return e;if(q$()===null)return!0;return P("tengu_cobalt_ridge",!1)}function cs(){if(D()!=="windows")return!0;return q$()!==null}function OM(){return cs()?"bash":"powershell"}
+```
+
+</details>
+
+`q$()` is not resolved by name; it is read as "locate Git Bash, or null" from its two uses.
+
+Three things fall out, none of them in the snapshot:
+
+1. 🧪 **`tengu_cobalt_ridge` is why the tool appears with no env var set.** On this machine
+   `$env:CLAUDE_CODE_USE_POWERSHELL_TOOL` and `$env:USER_TYPE` are both empty and Git Bash is
+   installed, yet the session had the PowerShell tool. Only the flag branch can produce that.
+   ⇒ This retro-explains the loose end in an earlier session, which recorded the tool arriving
+   "by another route (rollout or settings)". 🔬 The startup tip is still env-var-only —
+   `isRelevant: process.env.CLAUDE_CODE_USE_POWERSHELL_TOOL === undefined` — so it keeps firing
+   at people who already have the tool.
+2. **No Git Bash ⇒ the PowerShell tool turns itself on.** A Windows box without Git for Windows
+   needs no configuration at all.
+3. ⚠️ **`CLAUDE_CODE_USE_POWERSHELL_TOOL` is now live on macOS and Linux.** The snapshot returns
+   `false` there whatever the env var says; the binary returns `envVar === true`. So putting that
+   variable in a shared `settings.env` block would make `resolveDefaultShell()` answer
+   `"powershell"` on a Mac and send `!` at a `pwsh` that may not exist. **Set `defaultShell` in
+   shared dotfiles; never the env var.**
+
+### Binary-only: what `!` actually spawns 🔬
+
+The `!` handler, and the child-process shape. Both callers of `resolveDefaultShell` are here:
+
+```js
+async function handleBangCommand(input, …) {                       // was: F
+  const usePowerShell = psToolEnabled() && resolveDefaultShell() === "powershell"
+  const respond = getSettings().respondToBashCommands ?? true
+  logEvent("tengu_input_bash", { powershell: usePowerShell, respond })
+  …
+}
+
+// the spawn helper
+const { file, args } = resolveDefaultShell() === "powershell"
+  ? { file: "pwsh", args: ["-NoProfile", "-Command", command] }
+  : { file: "/bin/sh", args: [ … ] }
+```
+
+<details><summary>Original minified form, as it appears in the binary</summary>
+
+```js
+async function F(n,b,e){let u=lH()&&iat()==="powershell",l=Je().respondToBashCommands??!0;s("tengu_input_bash",{powershell:u,respond:l});…
+async function b(e){let{command:s}=e,i=e.cwd??ne(),{file:a,args:n}=iat()==="powershell"?{file:"pwsh",args:["-NoProfile","-Command",s]}:{file:"/bin/sh",a…
+```
+
+</details>
+
+- 🔬 **`pwsh` is hardcoded** — PowerShell 7. There is no `powershell.exe` 5.1 fallback.
+- 🔬 **`-NoProfile`** — the user's PowerShell profile does not load, so profile aliases and
+  functions do not exist in `!` commands.
+- 🔬 `respondToBashCommands` is **binary-only**: absent from the snapshot, and absent from the
+  snapshot's `logEvent`, which sends `{ powershell }` alone. Its schema string reads *"Whether
+  Claude responds after an input-box ! bash command runs. Set to false to add the command output
+  to context without a response."*
+- 🔬 Adjacent, unrelated, and easy to confuse with `defaultShell`: `CLAUDE_CODE_SHELL` (with
+  `Using shell override:` and `" is not a valid bash/zsh path, falling back to detection`) and
+  `CLAUDE_CODE_SHELL_PREFIX`. Those pick the POSIX login shell, not the `!` interpreter.
+
+### Binary-only: auto and bypass modes inject a *use-Bash* instruction 🔬
+
+Not in the snapshot — `rg 'While auto mode is active' src/` returns nothing. The binary's string
+table holds a template whose tool name is interpolated:
+
+```
+Do your work through the ⟨tool⟩ tool wherever it can accomplish the job: read files with cat,
+head, or sed -n, search with grep and find, and make file changes with sed, heredocs, or short
+scripts, rather than using the dedicated ⟨tools⟩. Fall back to a dedicated tool only when
+⟨tool⟩ genuinely cannot do the job.
+```
+
+🔬 Two sibling headers sit beside it: `While bypass permissions mode is active:` and
+`While auto mode is active:`. 🧪 Both render with **Bash**, and the command list is POSIX.
+
+⇒ On Windows this instruction actively pushes the model at Git Bash. A `CLAUDE.md` line telling
+Claude to prefer PowerShell is therefore a counterweight to a *harness* instruction, not to a
+model habit — and `defaultShell` does nothing to help, because it is never read on the
+tool-selection path.
+
+### 📦 Settings are parsed with plain `JSON.parse` — comments void the file
+
+Worth recording because the failure is silent. `parseSettingsFile` → `safeParseJSON`
+(`src/utils/json.ts`) → `JSON.parse(stripBOM(json))`, returning **`null`** on any error. One `//`
+line therefore discards the entire settings file with no message. `safeParseJSONC` exists in the
+same module but is reserved for VS Code keybindings.
+
+The outer settings object is `.passthrough()` (`types.ts:1072`), so an unknown key is preserved
+and ignored. ⇒ The only safe way to comment a `settings.json` is a sibling key, e.g.
+`"// defaultShell": "…"`.
+
+### Practical summary
+
+| Want | Do |
+|---|---|
+| `!` runs PowerShell on Windows only | `"defaultShell": "powershell"` — safe in shared dotfiles |
+| The same on every OS | also set `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` (and accept `pwsh` must exist) |
+| Claude to *choose* PowerShell | a `CLAUDE.md` instruction; no setting does this |
+| A comment in `settings.json` | a sibling `"// key"`, never `//` |
