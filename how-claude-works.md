@@ -2285,3 +2285,30 @@ Two other debug-log subsystems seen in the same dig, useful as `rg` anchors:
   global v6 address). 🧪
 - `[event-loop-stall] blocked for … (wall drift Nms, clock jump Nms …) [likely sleep/wake]` —
   the only record of the laptop sleeping, handy for locating the machine in time. 🧪
+
+### After an API error nothing resumes the session by itself — but any turn-shaped input does 🧪
+
+Checked against sixteen `Connection lost mid-response` drops in one transcript plus two live
+debug logs (details in `~/ai-conversations/claude-learning/stream-reset-after-first-block.md`):
+
+- The engine logs the drop as `[engine] turn N end (… stop=stop_sequence resultLen=0)` followed
+  by `[engine] turn ended in error: API Error: Connection lost mid-response …`. The turn is
+  over; there is no retry from the error state (consistent with the `Stop`-hook skip on
+  `isApiErrorMessage` and the `void` `StopFailure` hooks recorded for 2.1.229).
+- What *did* restart the session, per the next transcript record: a hand-typed message (13),
+  a message the user had **queued during the turn** and which was delivered in the same second
+  as the error (2), and a `<task-notification>` from a background Bash command finishing (1).
+  So a queued message, a background task, a Monitor event, or a `/loop` wakeup all look like
+  "auto-continue" to the user, and the tool itself contributes none of it.
+- `[bridge:repl] Injecting inbound user message: …` is logged only for Remote Control input;
+  local keyboard input leaves no debug-log line, so use the transcript to see what restarted a
+  turn.
+
+### Reproduction harness for stream resets 🧪
+
+`claude -p` nests fine inside a Claude Code Bash tool (a `Warning: no stdin data received in
+3s` unless stdin is redirected from `/dev/null`) and honours `--debug-file`, so a loop of
+`claude -p "<long answer>" --model haiku --debug-file run-N.txt` is a key-free way to exercise
+real Messages streams on the real path. The lines to count per run: `first byte after Nms`,
+`retrying streaming`, `finalizing partial`. Script:
+`~/ai-conversations/claude-learning/reproduce-stream-reset.sh`.
