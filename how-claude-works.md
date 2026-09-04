@@ -2312,3 +2312,64 @@ debug logs (details in `~/ai-conversations/claude-learning/stream-reset-after-fi
 real Messages streams on the real path. The lines to count per run: `first byte after Nms`,
 `retrying streaming`, `finalizing partial`. Script:
 `~/ai-conversations/claude-learning/reproduce-stream-reset.sh`.
+
+## 2.1.260
+
+### The cross-session inbox socket: a hook can send its own session a user message 🔬🧪
+
+Source of the question: can anything auto-continue after `Connection lost mid-response`? The
+2.1.78 stop-hook skip still means no hook can *reply* to an API error — but the inbox socket
+lets a hook *send* one. Write-up:
+`~/ai-conversations/claude-learning/stream-reset-after-first-block.md`.
+
+**Protocol** (the binary prints it in the debug log at startup, `[uds-messaging] Inject messages …`):
+one JSON line per message over `CLAUDE_CODE_MESSAGING_SOCKET` (`/tmp/cc-socks/<pid>.sock`):
+
+```
+{"type":"auth","token":"<CLAUDE_CODE_MESSAGING_TOKEN>"}          # "auth line optional here" was logged in bypass mode
+{"type":"user","message":{"role":"user","content":"hello"}}
+```
+
+Other accepted fields seen in the handler: `uuid`, `session_id` (dropped on mismatch:
+`Dropping user message: session_id mismatch`), `priority` (`now` | `next` | `later`),
+`file_attachments`, `msg_id`, `from`. A connection that sends no complete line within 30 s is
+closed. `~/.claude/sessions/<pid>.<hash>.key` holds `{peerToken, procStart, pidDomain}` — the
+token *peers* authenticate with; the process's own `CLAUDE_CODE_MESSAGING_TOKEN` is different.
+
+**Inbound policy** (un-minified; `[cross-session-inbound]` debug lines name the outcomes):
+
+```ts
+function decide(origin) {                              // was: k(e, n)
+  const forced = settings.crossSessionInbound          // was: lSe()
+  if (forced !== undefined) return forced              // accept | hold | refuse
+  if (origin?.selfSent) return 'accept'
+  const mode = currentPermissionMode()                 // was: v()
+  if (mode === null || !KNOWN.has(mode.mode)) return hold('mode-unknown')     // fail closed
+  const mine = isBypass(mode) ? 'bypass' : 'prompting' // plan counts as bypass if bypass is available
+  const asserted = origin.authenticated ? origin.fromMode : undefined
+  if (asserted !== undefined) return asserted === mine ? 'accept' : hold('mode-mismatch')
+  return mine === 'bypass' ? hold('no-mode-asserted') : 'accept'
+}
+```
+
+A held message shows a dialog — "Held message from another session … Deny / Deliver this
+message to Claude" — and the debug log says `held inbound peer message (1 held,
+cause=no-mode-asserted)`, then `held peer message APPROVED — released to queue` on approval.
+`selfSent` is computed from the connecting peer's verified pid (`await le(verifiedPeerPid, …)`);
+a synchronous hook child qualified, a detached `nohup` script that connected after its parent
+shell exited did not.
+
+**Envelope** the harness wraps peer messages in (`Iq = "cross-session-message"`):
+`<cross-session-message from="…" from-session="…" hop-chain="…" from-name="…" from-mode="…">body</cross-session-message>`.
+Delivered to the model as `Another Claude session sent a message:\n<body>\n\nThis came from
+another Claude session — not typed by your user, but very likely working on their behalf …`.
+
+**Empirical** 🧪 (throwaway `claude --debug --model haiku`, bypass mode, tmux):
+
+- External script with the peer token → held; approved → the *idle* session woke and replied.
+- `Stop` hook posting with the session's own socket/token → accepted immediately, delivered,
+  answered; two rounds, ~2 s each.
+
+**`StopFailure` input schema** 🔬: `hook_event_name: "StopFailure"`, `error` (enum),
+`error_details?: string` ("Raw API error message — preserves details … that user-facing
+content discards"), `last_assistant_message?: string`.
