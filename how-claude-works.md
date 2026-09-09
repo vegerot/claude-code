@@ -2373,3 +2373,155 @@ another Claude session — not typed by your user, but very likely working on th
 **`StopFailure` input schema** 🔬: `hook_event_name: "StopFailure"`, `error` (enum),
 `error_details?: string` ("Raw API error message — preserves details … that user-facing
 content discards"), `last_assistant_message?: string`.
+
+## 2.1.265
+
+🧪 Recorded **2026-09-09** on macOS arm64. `claude doctor` reported native
+**2.1.265**, commit **`b08ec8ffb505`**, at
+`~/.local/share/claude/versions/2.1.265`.
+
+🔬 The inspected executable was **199,422,144 bytes**, SHA-256
+`164b09eb800dedb9bb06304129fbf07743ab9db972ae07333ef4f18cde0cb8d5`.
+These findings come from its embedded JavaScript, not the older `src/` snapshot.
+
+### Local `REPL`: JavaScript tool orchestration inside Claude's Bun process 🔬🧪
+
+🔬 This build contains a tool named **`REPL`**, with search hint
+`execute JavaScript with programmatic tool access` and `enablesCodeExecution: true`.
+This is an agent-callable code-execution tool, distinct from the interactive
+terminal session also called a REPL elsewhere in this repository.
+
+🔬 Its input schema is `code: string`, `description?: string`, `timeout?: number`.
+The `code` description states `Supports top-level await. State persists across calls.`
+The advertised timeout defaults to **30,000 ms** and is capped at **600,000 ms**.
+The runtime separately tracks script time, inner tool calls and a hard wall-clock
+limit; the timeout field is not simply a shell-command timeout.
+
+🔬 The code can compose Claude tools with JavaScript loops, branches and
+`Promise.all`. Tool wrappers include file/shell operations and MCP calls; the prompt
+also defines shorthands including `sh`, `cat`, `rg`, `rgf`, `gl` and `put`.
+Module loading through `import` or `require` is rejected, directing the code to use
+the supplied tool globals.
+
+#### Execution uses the same process, with a separate JavaScript context 🔬
+
+🔬 The execution path creates a `Bun.Transpiler({loader: "js", replMode: true})`,
+creates a context through Bun's `vm` API, and evaluates a `vm.Script` in that
+context. It runs **inside the same Bun/OS process as Claude**. There is no REPL
+helper executable or worker-process dispatch on this path. A shell tool invoked
+from the code can still launch its own subprocess.
+
+🔬 Un-minified, condensed execution excerpts follow. These preserve the relevant
+calls, with descriptive identifiers; they omit tool-wrapper installation, state
+reuse, timeout handling and result serialization. The original identifiers are
+recorded in comments to make the mapping checkable.
+
+```js
+import * as vm from "vm"; // was: gV for context creation, Fzn for Script
+
+const transpiler = new Bun.Transpiler({ // was: g$e, initialized by r6o
+  loader: "js",
+  replMode: true,
+});
+
+const replContext = vm.createContext( // was: D in Y$e, later je in Gft
+  { __proto__: null },
+  { codeGeneration: { strings: true, wasm: false } },
+);
+
+// Source transformation happens in y$e before Gft evaluates the script.
+const transformedCode = transpiler.transformSync(inputCode); // was: r in y$e; input e
+const evaluation = new vm.Script(transformedCode, { // was: Dt in Gft; code Tt
+  filename: "repl-tool-code.js",
+  importModuleDynamically: () => {
+    throw new Error("import() is not available in REPL code.");
+  },
+}).runInContext(replContext, scriptRunOptions); // was: je, HY(N)
+```
+
+🔬 A JavaScript context supplies separate globals and variables inside the process;
+it does not establish an OS-process boundary. This distinguishes Claude's REPL
+from the separately launched `codex-code-mode-host` observed in the accompanying
+Codex 0.153.4 investigation.
+
+#### Enable predicate: environment override, then rollout flag 🔬
+
+🔬 Un-minified enable predicate; `environment` represents the normalized environment
+accessor, whose name in this source chunk is `a`:
+
+```js
+function isReplEnabled() { // was: b_
+  if (!isReplBuildEligible()) return false; // was: fH; returns true in this binary
+  if (environment.CLAUDE_CODE_REPL === false) return false;
+  if (environment.CLAUDE_CODE_REPL === true) return true;
+  const entrypoint = environment.CLAUDE_CODE_ENTRYPOINT; // was: e
+  if (entrypoint === "cli" || entrypoint === "remote") {
+    return readFeatureFlag("tengu_slate_harbor", false); // was: H
+  }
+  return false;
+}
+```
+
+🔬 The fallback is **off**, with automatic activation controlled by
+`tengu_slate_harbor` for CLI/remote entrypoints. The explicit override is
+`CLAUDE_CODE_REPL=1`; explicit false disables it. The gate is not an internal-user-only
+check in this binary: its outer eligibility function returns true. The environment
+variable is a discovered implementation setting, not an established stable public API.
+
+🧪 A new local `claude mcp serve` process initially omitted `REPL` from `tools/list`.
+Starting it with `CLAUDE_CODE_REPL=1` included the tool and allowed direct execution.
+This observed MCP result does not establish the rollout state for every interactive
+CLI session or account.
+
+🧪 Adding `"CLAUDE_CODE_REPL": "1"` to the existing `env` object in
+`~/.claude/settings.json` also enabled it: a fresh server exposed `REPL` with no
+shell environment override. The file was a symlink to
+`~/code/github.com/vegerot/dotfiles/.claude/settings.json`, and the edit preserved it.
+
+#### Persistent session context, but per-request MCP cleanup 🔬🧪
+
+🔬 Normal execution keeps the REPL context in session tool state, keyed by agent,
+and reuses it when the recorded conversation boundary still matches. The source
+also contains resume/fork hydration logic. Interactive-session persistence was not
+empirically tested in this investigation.
+
+🧪 Two direct MCP calls in one server process did **not** share variables. The first
+assigned `var localAuditValue = 41`; the second evaluated
+`({persisted: localAuditValue + 1})` and returned
+`ReferenceError: localAuditValue is not defined`.
+
+🔬 The MCP request handler constructs new tool state for each request and releases
+the main-agent REPL state in `finally`. That accounts for the result: the MCP test
+does not exercise the persistent state lifetime of the interactive session.
+
+#### Direct execution results and rediscovery anchors 🔬🧪
+
+🧪 A local JSON-RPC client started `claude mcp serve`, initialized MCP over stdin/stdout,
+listed tools and invoked `REPL` without any model inference:
+
+| JavaScript operation | Result |
+|---|---|
+| Mean of integers 1 through 10 | `5.5` |
+| `await sh("uname -s")` | `Darwin` |
+| `await cat(...)` on a temporary fixture | `Local Claude REPL file access verified.` |
+
+🔬 Binary byte offsets below identify the inspected copy. Minified identifiers can
+repeat across bundled source chunks, so match the surrounding API calls as well
+as the function name; offsets will change in another build.
+
+| Anchor | Byte offset | Meaning |
+|---|---:|---|
+| `fH` returning true | 158158084 | Build eligibility used by the gate |
+| `Wi` assigned `REPL` | 160732145 | Tool name |
+| `b_`, with `CLAUDE_CODE_REPL` and `tengu_slate_harbor` | 161581258 | Enable predicate |
+| `r6o`, with `Bun.Transpiler` | 166020389 | Cached transpiler |
+| `gV` imported from `vm` | 166022125 | Context API import |
+| `Y$e`, with `gV.createContext` | 166055122 | Context creation and wrappers |
+| `Gft`, with session state and script execution | 166071453 | REPL call implementation |
+| `new Fzn.Script`, filename `repl-tool-code.js` | 166074103 | Evaluation inside the context |
+| Server name `claude/tengu` | 189639779 | MCP server implementation |
+| `finally` releasing the main-agent REPL state | 189643748 | Per-request MCP cleanup |
+
+🧪 Full conversation, test outputs and comparison with Codex:
+[local-repl-and-codex-code-mode.md](../../vegerot/ai-conversations/claude-learning/local-repl-and-codex-code-mode.md).
+The retained evidence is under that conversation's `local-repl-evidence/` directory.
