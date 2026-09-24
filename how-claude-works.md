@@ -2525,3 +2525,49 @@ as the function name; offsets will change in another build.
 🧪 Full conversation, test outputs and comparison with Codex:
 [local-repl-and-codex-code-mode.md](../../vegerot/ai-conversations/claude-learning/local-repl-and-codex-code-mode.md).
 The retained evidence is under that conversation's `local-repl-evidence/` directory.
+
+## 2.1.281
+
+### Login precedence: the shared `~/.config/anthropic/` profile wins
+
+🔬 Besides the keychain item `Claude Code-credentials` and `~/.claude.json`, Claude Code reads
+the profile directory shared with the `ant` CLI (`ant auth login` writes it). The directory is
+`$ANTHROPIC_CONFIG_DIR`, else `$XDG_CONFIG_HOME/anthropic`, else `~/.config/anthropic`. The
+profile name is `$ANTHROPIC_PROFILE`, else the contents of `active_config`, else `default`.
+
+A profile counts only if `configs/<profile>.json` has `authentication.type` set to
+`user_oauth` or `oidc_federation`. A `user_oauth` profile also needs a credentials file:
+`authentication.credentials_path`, else `credentials/<profile>.json`.
+
+Claude Code picks a login source in this order (the labels are the strings the binary uses):
+
+| Condition | Source label |
+|---|---|
+| `ANTHROPIC_PROFILE` is set and names a valid profile | `profile-explicit` |
+| All the federation variables are set (`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, and others) | `env-quad` |
+| The default profile (`active_config`) is valid | `profile-implicit` |
+
+`/status` shows either profile source as `credentials-file · <auth type> · profile <name>`.
+
+🧪 On the work Mac, `/status` reported `Profile: credentials-file · user_oauth · profile default`.
+Meanwhile the keychain (`subscriptionType: "max"`) and `~/.claude.json` `oauthAccount`
+(`organizationType: claude_max`) still held a **cancelled** Max login. Those files were
+stale, not in use. The profile's `configs/default.json` has a `workspace_id: wrkspc_…`, which
+marks a Console (API-billed) organization. **To find out how a session is billed, run
+`/status` first. Don't trust `oauthAccount`.**
+
+🧪 The `ant` profile's OAuth token (`sk-ant-oat01-…`) gets `403 permission_error:
+"Authentication method not allowed for this endpoint."` from `/v1/organizations/me` and
+`/v1/organizations/cost_report`. The Admin API needs an Admin API key. `ant` 1.29.0 has no
+cost or usage report command.
+
+### Statusline `cost` object
+
+📦 `components/StatusLine.tsx` sends `cost.total_cost_usd`, `total_duration_ms`,
+`total_api_duration_ms`, `total_lines_added`, and `total_lines_removed`. The cost comes from the
+process-global `STATE.totalCostUSD`, so it includes subagents. 📖 `/clear` resets it, and the
+`modelPricing` managed setting replaces list prices. 🧪 A captured 2.1.281 input had
+`"rate_limits": null` while the session used the API-billed profile.
+
+🧪 Full conversation:
+[statusline-session-cost.md](../../vegerot/ai-conversations/claude-learning/statusline-session-cost.md).
