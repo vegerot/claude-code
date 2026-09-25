@@ -2822,5 +2822,21 @@ same-named project/user skill directory. Not verified against `src/` (skill-reso
 isn't in this repo's snapshot) — flagging as an empirically observed collision, not a documented
 contract.
 
+### A fired scheduled prompt is re-classified as a slash command if it looks like one
+
+🧪 A `CronCreate`/`ScheduleWakeup` `prompt` string that itself begins with a registered slash
+command name (e.g. a `/loop` job whose own payload starts with `/loop `) does not deliver as inert
+text when it fires. It re-enters the same input classifier live-typed input goes through, and
+renders with full `<command-message>`/`<command-name>`/`<command-args>` framing plus the target
+skill's whole prompt body reprinted — on the surface indistinguishable from the user typing that
+command again. 📦 `src/hooks/useScheduledTasks.ts`'s fire path just calls
+`enqueuePendingNotification({ value: prompt, mode: 'prompt', priority: 'later', isMeta: true, ... })`
+— nothing there special-cases slash-command-shaped text, so the re-classification must happen
+downstream, wherever queued prompt text is normally parsed for `/command` syntax before dispatch.
+Not fully traced to a specific function in `src/`; recorded as an observed behavior, not a located
+mechanism. Practical effect: a self-referential scheduling demo (schedule `/loop`'s own prompt as
+its payload) will look, turn by turn, exactly like a human re-issuing the command — the only tell
+is that the "new" invocation's argument text is word-for-word the stored payload.
+
 🧪 Full conversation:
 [loop-and-cron-scheduler.md](../../vegerot/ai-conversations/claude-learning/loop-and-cron-scheduler.md).
