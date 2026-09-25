@@ -2571,3 +2571,256 @@ process-global `STATE.totalCostUSD`, so it includes subagents. 📖 `/clear` res
 
 🧪 Full conversation:
 [statusline-session-cost.md](../../vegerot/ai-conversations/claude-learning/statusline-session-cost.md).
+
+## 2.1.282
+
+Commit `88e628ac8735` (`claude doctor`). All 🔬 claims below are from `strings` on
+`~/.local/share/claude/versions/2.1.282`, cross-checked against `src/skills/bundled/loop.ts`,
+`src/utils/cronScheduler.ts`, `src/utils/cronTasks.ts`, and `src/utils/cronJitterConfig.ts` (📦).
+
+### `/loop`'s dynamic mode does not exist in `src/` — it's a post-snapshot addition
+
+📦 `src/skills/bundled/loop.ts`'s `buildPrompt()` has no dynamic mode at all: a bare `/loop <text>`
+with no interval defaults to a fixed 10-minute recurring cron (`DEFAULT_INTERVAL = '10m'`).
+
+📖 `CHANGELOG.md`: "Changed `/loop`: self-paced dynamic mode and the no-prompt autonomous default
+are now always available, including on Bedrock/Vertex/Foundry" — this is the addition that makes
+`src/`'s version stale.
+
+🔬 The installed binary has the dynamic mode. A bare `/loop <text>` (no interval, no trailing
+`every ...`) now runs the prompt immediately, then self-paces by calling `ScheduleWakeup`
+repeatedly instead of creating one fixed cron job. Two sentinel strings select which recipe a
+wakeup re-enters: `<<autonomous-loop>>` (no-prompt autonomous default, `CronCreate`-based) and
+`<<autonomous-loop-dynamic>>` (autonomous default, `ScheduleWakeup`-based) — confirmed present
+verbatim in the binary, and `E.isLoopDefaultSentinel(o)` (below) checks a fired prompt against one
+of them for telemetry.
+
+### `ScheduleWakeup` is not a separate scheduler — it writes into the same cron store
+
+🔬 `ScheduleWakeup`'s handler (un-minified, original single-letter names kept as `// was:` — the
+line is real minified code, not paraphrased):
+
+```js
+function scheduleLoopWakeup(requestedDelaySeconds, prompt, opts) {  // was: C(e, o, n)
+  const { viaKeepalive, reason } = opts
+  if (!viaKeepalive) resetKeepaliveCount(0)                         // was: Y$t(0)
+  const supersededCount = cancelPendingLoopWakeups()                // was: f = I()
+  const now = Date.now()
+  const priorState = getLoopWakeupState(prompt)                     // was: d = cBr(o)
+  // A pending wakeup older than the max clamp (b seconds) since its last
+  // scheduled fire is treated as abandoned, not as an ongoing loop — this
+  // stops a laptop-sleep gap from instantly reading as "aged out".
+  const stale = priorState !== undefined && now > priorState.lastScheduledFor + CLAMP_MAX * 1000
+  const startedAt = priorState === undefined || stale ? now : priorState.startedAt
+  const maxAgeMs = getCronJitterConfig().recurringMaxAgeMs
+  if (maxAgeMs > 0 && now - startedAt >= maxAgeMs) {
+    // same 7-day recurringMaxAgeMs as CronCreate's recurring jobs, but
+    // anchored from the *loop's own* startedAt, not a per-wakeup createdAt.
+    if (!priorState?.agedOut) {
+      recordLoopWakeupState(prompt, { startedAt, lastScheduledFor: now - (CLAMP_MAX - CLAMP_MIN) * 1000, agedOut: true })
+      logEvent('tengu_loop_dynamic_wakeup_aged_out', { loop_age_ms: now - startedAt, max_age_ms: maxAgeMs })
+    }
+    return null
+  }
+  const { clamped, wasClamped, targetMs, createdAt, target } = computeWakeupTarget(requestedDelaySeconds) // was: F(e)
+  const cron = `${target.getMinutes()} ${target.getHours()} * * *`
+  addSessionCronTask({ id: newTaskId(), cron, prompt, createdAt, kind: 'loop', scheduledFor: targetMs, reason, ...(viaKeepalive && { keepalive: true }) })
+  recordLoopWakeupState(prompt, { startedAt, lastScheduledFor: targetMs })
+  setLoopActive(true)
+  if (viaKeepalive) {
+    incrementKeepaliveCount()
+    logEvent('tengu_loop_keepalive_fired', { clamped_delay_seconds: clamped, prompt_is_sentinel: isLoopDefaultSentinel(prompt) })
+    return { scheduledFor: targetMs, clampedDelaySeconds: clamped, wasClamped }
+  }
+  logEvent('tengu_loop_dynamic_wakeup_scheduled', {
+    chosen_delay_seconds: Number.isFinite(requestedDelaySeconds) ? requestedDelaySeconds : 0,
+    clamped_delay_seconds: clamped, was_clamped: wasClamped,
+    reason_length: reason?.length ?? 0, superseded_count: supersededCount,
+  })
+  return { scheduledFor: targetMs, clampedDelaySeconds: clamped, wasClamped }
+}
+```
+
+Confirms, from the binary rather than the tool description:
+
+- **Same store, different tag**: the wakeup is a session cron task (`addSessionCronTask`, the same
+  in-memory list `CronCreate`'s session-only jobs live in), just tagged `kind: 'loop'`.
+- **Cron shape is a daily minute/hour match**, not a one-shot date — `${minute} ${hour} * * *`, no
+  day-of-month/month pinning. In practice it still fires once because the loop either reschedules
+  or stops before the next day's match.
+- **Supersede, not stack**: `cancelPendingLoopWakeups()` runs at the top of every call, so calling
+  `ScheduleWakeup` again while one is pending cancels the old one first. `superseded_count` in the
+  `tengu_loop_dynamic_wakeup_scheduled` telemetry is this count, not a coincidence of naming.
+- **7-day aging is loop-anchored, not per-wakeup**: `recurringMaxAgeMs` (same GrowthBook-backed
+  value as `CronCreate`'s recurring jobs, see below) is compared against the loop's original
+  `startedAt`, carried forward call to call — the same 7-day cap applies to dynamic mode, just
+  anchored differently than a fixed `CronCreate` job's own `createdAt`.
+- **Stale-gap reset**: if more than `CLAMP_MAX` seconds (the upper delay clamp, 3600 per the tool
+  description) have passed since the last scheduled fire, `startedAt` resets to now instead of
+  accumulating age — a multi-day gap (session left open, laptop asleep) does not itself age out the
+  loop the instant it resumes.
+
+### The keepalive safety net, and its budget
+
+🔬 (adjacent in the same minified chunk, un-minified):
+
+```js
+function isLoopKeepaliveEnabled() {                                  // was: rzr()
+  const envOverride = process.env.CLAUDE_CODE_LOOP_KEEPALIVE
+  if (envOverride !== undefined) return envOverride
+  return getFeatureValue('tengu_kairos_loop_keepalive', true)
+}
+function fireKeepaliveWakeup(prompt) {                                // was: szr(e)
+  if (getKeepaliveCount() >= KEEPALIVE_BUDGET) {                      // was: Tqn() >= D
+    log('[loop] keepalive budget exhausted (model declined to reschedule twice) — ending loop')
+    logEvent('model_stopped', { via_keepalive: true })
+    return null
+  }
+  return scheduleLoopWakeup(KEEPALIVE_DEFAULT_DELAY, prompt, { viaKeepalive: true }) // was: C(O, e, ...)
+}
+```
+
+`KEEPALIVE_BUDGET` (`D`) is **2** — the exact log string says "declined to reschedule twice" — and
+`env CLAUDE_CODE_LOOP_KEEPALIVE` / GrowthBook flag `tengu_kairos_loop_keepalive` (default **on**)
+is the kill switch. Net effect, not documented in `ScheduleWakeup`'s own tool description: if a
+dynamic-mode turn ends without calling `ScheduleWakeup` again, the runtime schedules a fallback
+wakeup for you automatically — up to twice — before actually letting the loop die.
+
+### Stopping a dynamic loop is idempotent and scoped to `kind: 'loop'` only
+
+🔬 (same chunk, un-minified):
+
+```js
+function stopLoop() {                                                 // was: izr()
+  const alreadyEnded = isLoopAlreadyEnded()                            // was: e = dBr()
+  const pendingLoopTasks = getSessionCronTasks().filter(t => t.kind === 'loop') // was: o = b_().filter(...)
+  const inFlightPrompt = getInFlightTickPrompt()                       // was: n = spt()
+  clearKeepaliveState(null)                                            // was: p9e(null)
+  resetKeepaliveCount(0)                                               // was: Y$t(0)
+  removeSessionCronTasks(pendingLoopTasks.map(t => t.id))              // was: bW(...)
+  for (const t of pendingLoopTasks) dequeuePendingPrompt(t.prompt)      // was: K$t(l.prompt)
+  if (inFlightPrompt !== null) dequeuePendingPrompt(inFlightPrompt)
+  if (alreadyEnded) {
+    log('[loop] ScheduleWakeup({stop:true}) after loop already ended — cleanup only, terminal event suppressed')
+    return pendingLoopTasks.length
+  }
+  log(`[loop] model called ScheduleWakeup({stop:true}) — ending loop (${pendingLoopTasks.length} pending wakeup(s) cancelled)`)
+  logEvent('model_stopped', { via_keepalive: false })
+  return pendingLoopTasks.length
+}
+```
+
+🧪 Verified live: calling `ScheduleWakeup({stop: true})` with nothing pending (first iteration of a
+dynamic loop, no prior wakeup armed) returned a clean, correctly-worded no-op — "there was no
+pending wakeup to cancel" — and separately told me it does **not** touch a fixed-interval
+`CronCreate` job, matching `filter(t => t.kind === 'loop')` above: a plain recurring cron entry has
+no `kind` field, so it is invisible to this cleanup and needs `CronDelete` instead.
+
+### Cron jitter constants drifted from the `src/` snapshot; one field is new
+
+📦 `src/utils/cronJitterConfig.ts`'s `DEFAULT_CRON_JITTER_CONFIG`:
+
+```ts
+{ recurringFrac: 0.1, recurringCapMs: 15 * 60_000, oneShotMaxMs: 90_000,
+  oneShotFloorMs: 0, oneShotMinuteMod: 30, recurringMaxAgeMs: 7 * 86_400_000 }
+```
+
+🔬 The literal object in the installed binary:
+
+```js
+var DEFAULT_CRON_JITTER_CONFIG = {                // was: vG
+  recurringFrac: 0.5,        // was 0.1 in src/
+  recurringCapMs: 1_800_000, // 30 min — was 900_000 (15 min) in src/
+  oneShotMaxMs: 90_000,
+  oneShotFloorMs: 0,
+  oneShotMinuteMod: 30,
+  recurringMaxAgeMs: 604_800_000,  // 7 days, unchanged
+  cacheLeadMs: 15_000,             // new field, absent from src/ entirely
+}
+```
+
+Still sourced live from the GrowthBook key `tengu_kairos_cron_config` (same key name as `src/`), so
+these are the *current defaults*, not a hard-coded constant — an incident lever can still push a
+different config fleet-wide. But the shipped defaults moved: a recurring job's jitter can now push
+it up to **30 minutes** late relative to its nominal slot (was documented as 15), and jitter itself
+is proportionally larger (`recurringFrac` 0.5 vs 0.1 of the inter-fire gap, capped at the new
+30-minute ceiling).
+
+### `cacheLeadMs`: a prompt-cache-TTL optimization, applied in two different places
+
+🔬 The 5-minute prompt-cache window appears as a literal constant, `Xtn = 300_000` (ms), gating both
+mechanisms below. A cron pattern regex, `/^\*\/\d+ \* \* \* \*$/` (i.e. "every N minutes"), decides
+whether the recurring-reschedule path applies its cache-lead nudge:
+
+**1. Plain recurring `CronCreate` jobs matching `*/N * * * *`** — un-minified:
+
+```js
+function jitteredNextCronRunMs(cronExpr, fromMs, taskId, cfg = DEFAULT_CRON_JITTER_CONFIG) { // was: TPt
+  const t1 = nextCronRunMs(cronExpr, fromMs)                    // was: kPt(r, s)
+  if (t1 === null) return null
+  const t2 = nextCronRunMs(cronExpr, t1)
+  if (t2 === null) return t1
+  const gap = t2 - t1
+  // Narrow band: the inter-fire gap is at least the cache TTL, but subtracting
+  // cacheLeadMs would still leave it under the TTL — i.e. the job's period is
+  // *just barely* over 5 minutes (e.g. "*/6 * * * *"). Firing cacheLeadMs
+  // early keeps the fire inside the same 5-minute cache window as the last one.
+  if (EVERY_N_MINUTES_PATTERN.test(cronExpr) &&                 // was: A.test(r)
+      cfg.cacheLeadMs > 0 && cfg.cacheLeadMs < gap &&
+      gap >= CACHE_TTL_MS && gap - cfg.cacheLeadMs < CACHE_TTL_MS) {
+    return fromMs + gap - cfg.cacheLeadMs
+  }
+  const jitter = Math.min(taskIdFraction(taskId) * cfg.recurringFrac * gap, cfg.recurringCapMs)
+  return t1 + jitter
+}
+```
+
+So the cache-lead nudge is **not** dynamic-mode-only — it applies to any plain `*/N * * * *`
+recurring `CronCreate` job whose period sits in that narrow just-over-5-minutes band. This isn't
+mentioned in `CronCreate`'s own tool description at all; it only showed up by reading the jitter
+function's body.
+
+**2. `ScheduleWakeup`'s own target time** (inside `computeWakeupTarget`/`F(e)` above) takes a
+coarser approach — it first rounds the target up to the next whole minute (`P(e)`, below), then
+walks it backward in whole-minute steps while doing so keeps the gap above `CACHE_TTL_MS -
+cacheLeadMs` and doesn't undercut the minimum clamp:
+
+```js
+function roundUpToMinute(ms) {                       // was: P(e)
+  const d = new Date(ms)
+  if (d.getSeconds() > 0 || d.getMilliseconds() > 0) d.setMinutes(d.getMinutes() + 1)
+  d.setSeconds(0, 0)
+  return d.getTime()
+}
+```
+
+🔬 This confirms something `ScheduleWakeup`'s tool description doesn't say: **the actual fire time
+is always quantized to a whole minute**, even though `delaySeconds` is documented purely as a
+`[60, 3600]`-second value. Requesting `delaySeconds: 90` doesn't fire 90 seconds out — it fires at
+the next whole-minute boundary at or after that, same minute-granularity floor as fixed-interval
+`/loop`.
+
+### `CronCreate`'s `durable` description changes at runtime — caught mid-session, not inferred
+
+🧪 Fetching the `CronCreate` tool schema twice in one conversation returned two different bodies for
+the `durable` parameter: first "true = persist to `.claude/scheduled_tasks.json` and survive
+restarts...", later "Has no effect — durable persistence is not available. All jobs are
+session-only." 📦 `src/tools/ScheduleCronTool/CronCreateTool.ts`'s `description()` calls
+`buildCronCreateDescription(isDurableCronEnabled())` — a live gate read on every fetch, by design
+(the source comment: "Kill switch forces session-only; schema stays stable so the model sees no
+validation errors when the gate flips mid-session"). 🧪 confirms this actually flips within a
+single live session, not just in theory.
+
+### `Skill(skill: "loop")` can resolve to a same-named user skill instead of the bundled one
+
+🧪 Calling the `Skill` tool with `{skill: "loop"}` loaded `~/.claude/skills/loop/SKILL.md` — a
+user-installed, Codex-oriented skill with unrelated content (`clock.sleep`, `.codex/loop.md`) —
+instead of the bundled `/loop` skill (`src/skills/bundled/loop.ts`, `registerBundledSkill({name:
+'loop', ...})`). The **slash command** `/loop` still dispatches correctly to the bundled skill in
+the same session; only the programmatic `Skill` tool call with a bare name is shadowed by a
+same-named project/user skill directory. Not verified against `src/` (skill-resolution precedence
+isn't in this repo's snapshot) — flagging as an empirically observed collision, not a documented
+contract.
+
+🧪 Full conversation:
+[loop-and-cron-scheduler.md](../../vegerot/ai-conversations/claude-learning/loop-and-cron-scheduler.md).
