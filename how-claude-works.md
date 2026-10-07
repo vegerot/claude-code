@@ -2840,3 +2840,17 @@ is that the "new" invocation's argument text is word-for-word the stored payload
 
 🧪 Full conversation:
 [loop-and-cron-scheduler.md](../../vegerot/ai-conversations/claude-learning/loop-and-cron-scheduler.md).
+
+## 2.1.293
+
+### Web search frequency: Claude Code has no "how often to search" rule 🔬
+
+Checked against the installed 2.1.293 binary on 2026-10-07 and compared with `src/tools/WebSearchTool/prompt.ts`.
+
+- **Deferred, not eager.** `WebSearch` and `WebFetch` set `shouldDefer: true` in `src/`. At startup the model sees only their names. Their descriptions load only after a `ToolSearch` call, so nothing in them can push the model toward a search it has not already chosen. Codex's `web.run` works the other way: it is a direct tool, so its "you MUST browse" text is in context from the first turn.
+- **Two descriptions, chosen by the lean-prompt check.** Models on the lean prompt (for example Opus 5.5) get a short description: `Search the web. Returns result blocks with titles and URLs. US-only.` plus three bullets (current month, domain filters, `Sources:` list). Other models get the older `src/` text. That text has the closest thing to a trigger: "Use this tool for accessing information beyond Claude's knowledge cutoff". Neither version says how often to search.
+- **The `mode` hint is gated by a server flag.** The always-on system-prompt paragraph (`WebSearch takes a \`mode\`. Use "standard" by default … When you plan several searches, send them in the same turn.`) and the `standard`/`extended` parameter exist only when the GrowthBook flag `tengu_sleepy_shore` (or `CLAUDE_CODE_WEB_SEARCH_FAST_ARG`) enables them. The paragraph is added only when `WebSearch` is in the tool list. The flag payload can override `mode_description`, `system_hint`, and `web_search_addendum`, so the server can change the wording without a release. That wording is about cost and mode, not frequency.
+- **After a search.** The tool result ends with `REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.`
+- **Upper bound only.** There is a session-wide cap of 200 searches, set with `CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION`. It was added in the CHANGELOG "to stop runaway search loops", and it is the only quantitative rule about frequency.
+
+Net effect: any push to search *more* has to come from user instructions (CLAUDE.md, rules), not from the harness.
