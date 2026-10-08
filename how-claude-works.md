@@ -2221,7 +2221,7 @@ and ignored. ⇒ The only safe way to comment a `settings.json` is a sibling key
 
 Source of the question: a week of `API Error: Connection lost mid-response` in one session,
 with `/debug` on for the last day (write-up in
-`~/ai-conversations/claude-learning/stream-reset-after-first-block.md`).
+`~/ai-conversations/claude/stream-reset-after-first-block.md`).
 
 The `/v1/messages` stream consumer keeps three flags and decides on a stream error
 (`ECONNRESET`, `EPIPE`, watchdog idle timeout, mid-stream 5xx) with this rule. Un-minified from
@@ -2289,7 +2289,7 @@ Two other debug-log subsystems seen in the same dig, useful as `rg` anchors:
 ### After an API error nothing resumes the session by itself — but any turn-shaped input does 🧪
 
 Checked against sixteen `Connection lost mid-response` drops in one transcript plus two live
-debug logs (details in `~/ai-conversations/claude-learning/stream-reset-after-first-block.md`):
+debug logs (details in `~/ai-conversations/claude/stream-reset-after-first-block.md`):
 
 - The engine logs the drop as `[engine] turn N end (… stop=stop_sequence resultLen=0)` followed
   by `[engine] turn ended in error: API Error: Connection lost mid-response …`. The turn is
@@ -2311,7 +2311,7 @@ debug logs (details in `~/ai-conversations/claude-learning/stream-reset-after-fi
 `claude -p "<long answer>" --model haiku --debug-file run-N.txt` is a key-free way to exercise
 real Messages streams on the real path. The lines to count per run: `first byte after Nms`,
 `retrying streaming`, `finalizing partial`. Script:
-`~/ai-conversations/claude-learning/reproduce-stream-reset.sh`.
+`~/ai-conversations/claude/reproduce-stream-reset.sh`.
 
 ## 2.1.260
 
@@ -2320,7 +2320,7 @@ real Messages streams on the real path. The lines to count per run: `first byte 
 Source of the question: can anything auto-continue after `Connection lost mid-response`? The
 2.1.78 stop-hook skip still means no hook can *reply* to an API error — but the inbox socket
 lets a hook *send* one. Write-up:
-`~/ai-conversations/claude-learning/stream-reset-after-first-block.md`.
+`~/ai-conversations/claude/stream-reset-after-first-block.md`.
 
 **Protocol** (the binary prints it in the debug log at startup, `[uds-messaging] Inject messages …`):
 one JSON line per message over `CLAUDE_CODE_MESSAGING_SOCKET` (`/tmp/cc-socks/<pid>.sock`):
@@ -2523,7 +2523,7 @@ as the function name; offsets will change in another build.
 | `finally` releasing the main-agent REPL state | 189643748 | Per-request MCP cleanup |
 
 🧪 Full conversation, test outputs and comparison with Codex:
-[local-repl-and-codex-code-mode.md](../../vegerot/ai-conversations/claude-learning/local-repl-and-codex-code-mode.md).
+[local-repl-and-codex-code-mode.md](../../vegerot/ai-conversations/claude/local-repl-and-codex-code-mode.md).
 The retained evidence is under that conversation's `local-repl-evidence/` directory.
 
 ## 2.1.281
@@ -2570,7 +2570,7 @@ process-global `STATE.totalCostUSD`, so it includes subagents. 📖 `/clear` res
 `"rate_limits": null` while the session used the API-billed profile.
 
 🧪 Full conversation:
-[statusline-session-cost.md](../../vegerot/ai-conversations/claude-learning/statusline-session-cost.md).
+[statusline-session-cost.md](../../vegerot/ai-conversations/claude/statusline-session-cost.md).
 
 ## 2.1.282
 
@@ -2839,7 +2839,7 @@ its payload) will look, turn by turn, exactly like a human re-issuing the comman
 is that the "new" invocation's argument text is word-for-word the stored payload.
 
 🧪 Full conversation:
-[loop-and-cron-scheduler.md](../../vegerot/ai-conversations/claude-learning/loop-and-cron-scheduler.md).
+[loop-and-cron-scheduler.md](../../vegerot/ai-conversations/claude/loop-and-cron-scheduler.md).
 
 ## 2.1.293
 
