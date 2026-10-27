@@ -1466,6 +1466,47 @@ checked and misread.
 multi-monitor setups"*. A **bugfix for a user-facing tool is evidence the tool ships.** When
 `src/` says a feature is gated off, grep the changelog wide before repeating it.
 
+#### 🚪 A gateway hides it even when it is enabled 🧪📖
+
+Recorded **2026-10-27** in a Claude Desktop Code-tab session (2.1.311) running through the
+local gateway (`ANTHROPIC_BASE_URL=http://127.0.0.1:8317`, auth via `ANTHROPIC_AUTH_TOKEN`).
+
+🧪 `~/.claude.json` still had `"enabledMcpServers": ["computer-use"]` for that project, yet the
+session had **zero** `mcp__computer-use__*` tools — not in the tool list, not deferred, not
+findable by ToolSearch. The same Desktop reported *"Remote Control isn't available in this
+deployment"*, another sign the app treats a gateway as a non-claude.ai deployment.
+
+📖 That matches the docs' eligibility rule: claude.ai authentication on a Pro or Max plan. The
+per-project enable flag is necessary but not sufficient — the eligibility check runs first and
+the server is simply never registered.
+
+**The code is installed; two gates hide it.** 🔬 The 2.1.311 binary still carries the whole
+server (`computer-use.lock`, `request_access`, *"Claude is using your computer"*), and the
+Desktop bundle ships `@ant/claude-swift/build/Release/computer_use.node`. Desktop's log shows
+it loading (`computer_use.node required in 7ms`).
+
+🔬 **CLI gate** (2.1.311, decompiled): not HIPAA **and** subscription tier is `max` or `pro`
+**and** GrowthBook `tengu_malort_pedway.enabled`. Both halves fail in a gateway session:
+
+- The tier comes from the claude.ai OAuth token. `src/utils/auth.ts` `isAnthropicAuthEnabled()`
+  returns false when `ANTHROPIC_AUTH_TOKEN` is set, unless the entrypoint is exactly
+  `claude-desktop`. The 3P Desktop launches the CLI as `CLAUDE_CODE_ENTRYPOINT=claude-desktop-3p`,
+  so the exemption does not apply and the tier is `null`.
+- The 3P Desktop also sets `DISABLE_GROWTHBOOK=1`, so the flag falls back to its default,
+  `enabled: false`. (The same variable is why Remote Control says it is unavailable.)
+
+🔬 **Desktop gate** (3.6556.2): platform supported **and** not HIPAA **and** GrowthBook
+`chicago_config.enabled` **and** the user setting `chicagoEnabled`. The setting was `true` in
+`~/Library/Application Support/Claude/config.json`. The flag was the blocker:
+`~/Library/Logs/Claude/main.log` logged `enabled=true` through 2026-09-04, while Desktop was
+signed in to claude.ai, and `enabled=false` on every launch from 2026-09-10 onward. On
+2026-10-26 the log shows OAuth refresh failing and *"User is logged out"*. 🤔 Inferred, not
+proven: GrowthBook now evaluates this install anonymously, and anonymous evaluation is off.
+
+🔎 Web search found no public report of computer use through a gateway. The closest is
+anthropics/claude-code#43931, where an Anthropic maintainer restates the Pro/Max + `/mcp` rule
+and notes that telemetry-disabling env vars block feature checks.
+
 ### `permissions.defaultMode: "bypassPermissions"` replaces the CLI flag 📦
 
 📦 `src/utils/permissions/permissionSetup.ts:722` builds `orderedModes` in this precedence:
