@@ -2947,3 +2947,44 @@ pull a queued message back before the next tool result absorbs it; or say "after
 in the message so the model defers it itself.
 
 🧪 Full conversation: [queue-vs-steer.md](../../vegerot/ai-conversations/claude/queue-vs-steer.md).
+
+### PTC and the local `REPL` tool: PTC never; `REPL` off in 2.1.317 external builds 🔬🧪
+
+Question: does Claude Code use PTC (the cookbook's `tool_use/programmatic_tool_calling_ptc.ipynb`) or
+a REPL / Code-Mode style tool for its own tool calls? Checked 2026-11-02 on 2.1.317 (devbox,
+`linux`).
+
+**API PTC: no.** PTC is server-side: a tool opts in with `allowed_callers:
+["code_execution_20250825"]`, Claude writes Python in the code-execution container, and `tool_use`
+blocks carry a `caller` field. The 2.1.317 binary has no `allowed_callers`, no `code_execution_20…`
+request tool and no `programmatic_tool` string. `server_tool_use` / `code_execution_tool_result`
+appear only as *response*-block parsing in the bundled SDK. The changelog has no PTC entry.
+
+**Local `REPL` tool: shipped in 2.1.265, switched off in 2.1.317.** See
+[Local `REPL`](#local-repl-javascript-tool-orchestration-inside-claudes-bun-process) above for the
+2.1.265 mechanism (Bun `vm` context in the same process; opt-in via `CLAUDE_CODE_REPL`).
+
+- 🧪 `claude mcp serve` on 2.1.317 does **not** list `REPL`, with or without `CLAUDE_CODE_REPL=1`
+  (2.1.265 listed it once the variable was set). Test script: a stdio `initialize` + `tools/list`.
+- 🔬 `CLAUDE_CODE_REPL` appears once in the 2.1.317 binary, in a list of env-var *names*. No
+  expression reads it, and `CLAUDE_REPL_MODE` is absent.
+- 🔬 `replMode: rj()` is still passed to telemetry, but one `function rj(){return!1}` sits in a run
+  of `return!1` stubs — the shape external builds get when an internal-only branch is removed at
+  build time. Minified names are reused across modules, so treat this as strong evidence, not proof.
+- 🔬 `tengu_slate_harbor_experiment` has been **repurposed**: in 2.1.317 it gates the new `/init`
+  prompt (`CLAUDE_CODE_NEW_INIT || flag`), not the REPL. The 2.1.265 note about the flag no longer
+  applies to this build.
+- 🔬 Only the tool name constants (`"REPL"`) remain. The `vm.createContext` hits in the binary are
+  Bun's own `node:vm` internals, not Claude's REPL implementation.
+- 🧪 This session's own tool list has `Read`/`Bash`/`Edit` directly visible. REPL mode would hide
+  them, so it was not active here.
+
+Not done: bisecting 2.1.266–2.1.316 to find when it was removed; the binary is a Bun *bytecode*
+build, so string searches can miss code. The older `src/` snapshot's `REPLTool/constants.ts` gated
+it on `USER_TYPE === 'ant'` — that matches 2.1.317 but **not** 2.1.265, where build eligibility
+returned true. Do not cite the snapshot for what an external build does.
+
+**Adjacent, not PTC:** the public `Workflow` tool runs a JS script that orchestrates *subagents*; it
+does not script ordinary tool calls.
+
+🧪 Full conversation: [ptc-vs-local-repl.md](../../vegerot/ai-conversations/claude/ptc-vs-local-repl.md).
