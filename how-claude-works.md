@@ -2895,3 +2895,55 @@ Checked against the installed 2.1.293 binary on 2026-10-07 and compared with `sr
 - **Upper bound only.** There is a session-wide cap of 200 searches, set with `CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION`. It was added in the CHANGELOG "to stop runaway search loops", and it is the only quantitative rule about frequency.
 
 Net effect: any push to search *more* has to come from user instructions (CLAUDE.md, rules), not from the harness.
+
+## 2.1.317
+
+### Messages sent mid-turn: steer by default, no "hold until the turn ends" key 🧪🔬
+
+Question: is there a Claude Code equivalent of Codex's Tab, which queues a message for *after*
+the current turn instead of steering it?
+
+**Answer: no.** Checked on 2026-11-02.
+
+🔬 Default `Chat` keybindings in the binary:
+
+| Key | Action | Effect while a turn runs |
+|---|---|---|
+| `enter` | `chat:submit` | Queues the message, then injects it at the next tool-result boundary (steer) |
+| `ctrl+x enter` | `chat:queueSubmit` | Sets `wait: true` on the submission; in normal mode it is still injected mid-turn |
+| `ctrl+enter` / `ctrl+x ctrl+s` | `chat:sendNow` | Moves running tools to the background and sends all queued messages right away |
+
+🔬 `wait: true` only matters to the built-in **responsive mode** mod (`cc-plugin-responsive-mode`).
+There, plain Enter interrupts the turn and sends (`input_send_now_responsive_enter`), and the hint
+reads `enter to interrupt and send · ctrl+x then enter to queue`. That mod is off by default and
+gated by the GrowthBook flag `tengu_quiet_ember`. It is not in `CHANGELOG.md`.
+
+🧪 Experiment (Haiku, bypass mode, scratch dir, tmux). Prompt: run `sleep 20 && echo first`,
+then `sleep 20 && echo second`, then reply `DONE`. During the first sleep, type `Also say BANANA.`
+and press `ctrl+x` then `enter`. Result: one turn, final reply `DONE BANANA`. The transcript JSONL
+shows the message as a `queued_command` attachment right after the **first** `tool_result`, and
+the queue record says:
+
+```json
+{"type":"queue-operation","operation":"remove","content":"Also say BANANA.","reason":"absorbed_mid_turn"}
+```
+
+`ctrl+x ctrl+e` (external editor) opened from the same tmux `send-keys` sequence, so the
+`ctrl+x` chord prefix did register. The `ctrl+x enter` press really was `chat:queueSubmit`.
+
+📖 **Not a bug: this is the documented design.** The docs
+(<https://code.claude.com/docs/en/interactive-mode#when-claude-code-sends-what-you-queued>) say
+that a queued *message* reaches Claude "as soon as those tool calls finish, within the same turn".
+Only queued *commands* and `!` shell commands are held until the turn ends. In Claude Code, "queue"
+means "don't cut the running tool call or reply short", not "hold until the turn ends". The
+keybindings page describes `chat:queueSubmit` as "marked to wait its turn … never interrupts the
+turn". "Never interrupts" is in contrast with `chat:sendNow` and with Enter in responsive mode, not
+with steering. Open feature request for a real end-of-turn queue: anthropics/claude-code#63190
+(CLI, `area:tui`, open, no Anthropic reply as of 2026-11-02). Earlier requests (#49373, #48268)
+were closed by a bot as duplicates.
+
+Practical workarounds: leave the text unsent in the input box until the turn ends; press `↑` to
+pull a queued message back before the next tool result absorbs it; or say "after you finish, …"
+in the message so the model defers it itself.
+
+🧪 Full conversation: [queue-vs-steer.md](../../vegerot/ai-conversations/claude/queue-vs-steer.md).
