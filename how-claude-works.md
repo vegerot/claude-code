@@ -2988,3 +2988,66 @@ returned true. Do not cite the snapshot for what an external build does.
 does not script ordinary tool calls.
 
 🧪 Full conversation: [ptc-vs-local-repl.md](../../vegerot/ai-conversations/claude/ptc-vs-local-repl.md).
+
+## 2.1.318
+
+Recorded **2026-11-03** while comparing Claude Code memory with Codex memory.
+
+### Memory: the five layers
+
+| Layer | Where | Who writes it | How it reaches the model |
+|---|---|---|---|
+| Instructions (`CLAUDE.md`, rules) | managed → user → project → local | the human | whole files in the system prompt (see 2.1.234) |
+| Auto-memory | `~/.claude/projects/<sanitized-git-root>/memory/` | the main agent, with the Write/Edit tools | `MEMORY.md` index loaded every session; topic files are read on demand or recalled |
+| Extract-memories fork | same directory | a background fork at the end of each turn | same as auto-memory |
+| Session memory | 📦 `<projectDir>/<sessionId>/session-memory/summary.md` (🔬 that path string is gone from 2.1.318) | a background fork, periodically | 🔬 `current_session_memory` attachment; 📦 feeds compaction |
+| Agent memory | `~/.claude/agent-memory/<type>/`, `.claude/agent-memory/<type>/`, `.claude/agent-memory-local/<type>/` | the subagent | the subagent's own `MEMORY.md`, inlined in its system prompt |
+
+📦 `memdir/paths.ts`: the auto-memory directory key is the **canonical git root**, so every
+worktree of a repo shares one memory directory. Override order:
+`CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` → `autoMemoryDirectory` (policy/flag/local/user settings only;
+project settings are excluded so a repo cannot point memory at `~/.ssh`) → default. Off switches:
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY`, `--bare`, `autoMemoryEnabled: false`.
+⚠️ 📖 The current docs (<https://code.claude.com/docs/en/memory#storage-location>) supersede the
+"project settings excluded" part: `autoMemoryDirectory` is read from **every** settings scope, and
+a project's `.claude/settings.json` or `.claude/settings.local.json` value is honored "under the same
+workspace trust rule as hooks". With `permissions.blockReadsOutsideWorkingDirectories` on, a
+directory chosen by a repository's settings is neither loaded nor written. The docs also say:
+`CLAUDE_CODE_PROJECT_DIR_NAME` (≥ 2.1.234) overrides the `<project>` key; memory files are exempt
+from the `cleanupPeriodDays` sweep; Claude Code stamps a `modified` ISO 8601 frontmatter field on
+each memory write; self-hosted environments default auto memory **off**; the `/memory` toggle
+cannot turn auto memory back on in a background session or one that Claude itself started.
+
+📦 `memdir/memdir.ts`: `MEMORY.md` is an index, capped at **200 lines and 25,000 bytes**. Past either
+cap it is cut and a warning is appended. The prompt fixes a closed four-type taxonomy
+(`user`/`feedback`/`project`/`reference`) and forbids saving anything derivable from the code or
+git history. 🔬 "is an index, not a memory" and "Only part of it was loaded" are both in the
+2.1.318 binary.
+
+📦 `services/extractMemories/extractMemories.ts`: when the model ends a turn with no tool calls, a
+forked agent that shares the parent's prompt cache scans the new messages and writes memories.
+It can only Write/Edit inside the memory directory. If the main agent already wrote a memory in
+that range, the fork skips it, so the two never both write for the same turn. The gate is a
+GrowthBook flag. 🔬 `tengu_passport_quail` is in the binary.
+
+📦 `memdir/findRelevantMemories.ts`: **recall** sends the frontmatter headers of the memory files
+to Sonnet, which picks up to 5 files relevant to the current query (`MEMORY.md` excluded,
+already-surfaced files filtered out). 📖 CHANGELOG lists "memory recall" fixes, so it ships.
+
+📦 `services/autoDream/`: a "dream" consolidation fork runs when ≥ 24 h **and** ≥ 5 sessions have
+passed since the last one. 🔬 "You are performing a dream" is in the binary. 📖 Not mentioned in
+the public CHANGELOG or the memory docs. The publicly announced "Dreams" (research preview, May
+2026) is a separate **Managed Agents API** feature that consolidates memory stores. Web articles
+that describe a Claude Code `/dream` command could not be confirmed from an Anthropic source.
+
+🔬 Drift from `src/`: the snapshot's team-memory HTTP sync (`/api/claude_code/team_memory`) and
+its "Searching past context" prompt section are **not** in 2.1.318. Team memory prompt text is
+still there; sync now goes through a `memory-watcher` configured by `CLAUDE_MEMORY_STORES`
+(JSON). 📖 2.1.172: "Fixed memory recall not finding mounted team memory stores".
+
+⚠️ Supersedes the 2.1.234 note "`AGENTS.md` is never auto-loaded". 📖 2.1.277: "in a project
+with no CLAUDE.md, Claude Code reads AGENTS.md instead", toggled under "Project instructions" in
+`/config`. 🧪 This session in `vegerot/ai-conversations` (no `CLAUDE.md`) received its `AGENTS.md`
+as project instructions.
+
+🧪 Full comparison across six coding agents: [memory-across-coding-agents.md](../../vegerot/ai-conversations/claude/memory-across-coding-agents.md).
